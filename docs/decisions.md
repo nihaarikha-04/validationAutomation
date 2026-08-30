@@ -42,3 +42,61 @@ The retry loop is required because the Smartech snippet loads asynchronously —
 throw even though the SDK has not initialised. *Not throwing therefore proves a callable exists, not
 that the SDK is live.* Real initialisation is confirmed only by observing the first genuine debug
 event. Phase 1 reports this as "detected"; Phase 2 must upgrade that to "confirmed" on first event.
+
+---
+
+## D3 — `read-excel-file` for reading workbooks, not SheetJS
+
+**Chosen:** `read-excel-file@9`, imported from its `/browser` subpath.
+
+SheetJS (`xlsx`) is the obvious default, but the version published to npm is stuck at **0.18.5**,
+which predates the fix for the prototype-pollution advisory affecting `<0.19.3`; newer SheetJS builds
+are distributed only from the vendor's own registry. An Event Sheet is untrusted input by our own
+coding rules, so shipping a parser with a known advisory to parse it is the wrong trade.
+
+`exceljs` was the other candidate. It is maintained, but it is a read *and write* library built around
+Node streams and Buffers, which needs polyfilling to work in a browser bundle. We only read here.
+
+**Consequences:**
+- The library is imported as `read-excel-file/browser`; the package publishes no bare entry point, only
+  subpaths (`/browser`, `/node`, `/web-worker`, `/universal`).
+- Its published types disagree with its runtime shape: it returns `[{ sheet, data }, ...]` for the whole
+  workbook even when a `sheet` option is passed. `parse-xlsx.ts` validates that shape at runtime rather
+  than asserting it, so a library upgrade that changes it fails loudly.
+- **Phase 5 still needs an XLSX writer** for report export. This decision does not cover it. Choose the
+  writer then — the reader sits behind `readWorkbook()` and can be swapped without touching callers.
+
+---
+
+## D4 — An Event Sheet row is one field seen through two channels
+
+**Confirmed with the client-side owner.** The Event Sheet carries four field columns, not two:
+**Payload** and **Payload Data Type**, then **Attribute** and **Attribute Data Type**.
+
+They are **paired per row**. One row is one logical field of the event, recorded under the name it
+carries in each channel — `product_id` in the debug payload is `prid` in the network call. The
+datatypes are recorded separately because the two channels do not always agree (a number in the
+payload can arrive as a string once form-encoded).
+
+**Model:**
+
+```
+FieldSchema { payloadName, payloadType, attributeName, attributeType, required, description, example }
+EventSchema { name, fields: FieldSchema[] }
+```
+
+`required`, `description` and `example` belong to the pair, not to one channel.
+
+**Consequences:**
+- Either side may be blank. Sheets documenting only the debug channel are common, and attribute-only
+  sheets are legal, so detection requires an event-name column plus **at least one** of the two name
+  columns — not both.
+- `AttributeType` was renamed `DataType`: it now types either channel, so a channel-specific name
+  would have been misleading.
+- Detection carries eight roles. A header naming its channel ("Payload Data Type") resolves directly;
+  a bare "Data Type" scores equally for both type roles and is broken by **adjacency** — it belongs to
+  the name column it immediately follows. Following neither, it stays ambiguous and goes to the user.
+- Field identity follows the payload name where present, attribute name otherwise, because the payload
+  is the channel the MVP validates.
+- Phase 3 validates the payload side. Phase 7 validates the attribute side and reuses the same engine,
+  which is why the validator must take a plain object rather than "a debug event".

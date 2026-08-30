@@ -20,3 +20,147 @@ body {
   margin: 0;
   opacity: 0.7;
 }
+
+.status {
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+
+.status__grid {
+  display: flex;
+  gap: 24px;
+  margin: 0;
+  flex-wrap: wrap;
+}
+
+.status__item dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+}
+
+.status__item dd {
+  margin: 2px 0 0;
+  font-weight: 600;
+}
+
+.status__diagnostic {
+  margin: 10px 0 0;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.upload {
+  margin-bottom: 14px;
+}
+
+.upload__label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.upload__file {
+  margin: 8px 0 0;
+  opacity: 0.7;
+}
+
+.upload__error,
+.mapping__error {
+  margin: 8px 0 0;
+  color: #c0392b;
+}
+
+.mapping {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 14px;
+}
+
+.mapping h2 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.mapping__why {
+  margin: 0;
+  opacity: 0.75;
+}
+
+.mapping__row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.mapping button {
+  align-self: flex-start;
+  padding: 5px 12px;
+}
+
+.tree h2 {
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+
+.tree__events {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.tree__events > li {
+  border-top: 1px solid rgba(128, 128, 128, 0.25);
+  padding: 6px 0;
+}
+
+.tree__count {
+  margin-left: 8px;
+  opacity: 0.6;
+  font-size: 11px;
+}
+
+.tree__table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0 4px;
+}
+
+.tree__table th,
+.tree__table td {
+  text-align: left;
+  padding: 4px 8px 4px 0;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+  font-weight: normal;
+}
+
+.tree__table th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+}
+
+.tree__warnings {
+  margin-bottom: 10px;
+}
+
+.mapping__legend {
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.tree__table {
+  display: block;
+  overflow-x: auto;
+}
