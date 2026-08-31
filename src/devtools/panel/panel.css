@@ -164,3 +164,236 @@ body {
   display: block;
   overflow-x: auto;
 }
+
+.stream {
+  margin-top: 16px;
+  border-top: 1px solid rgba(128, 128, 128, 0.35);
+  padding-top: 12px;
+}
+
+.stream__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stream__head h2 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.stream__empty {
+  margin: 8px 0 0;
+  opacity: 0.65;
+}
+
+.stream__list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+}
+
+.stream__list > li {
+  border-top: 1px solid rgba(128, 128, 128, 0.2);
+  padding: 4px 0;
+}
+
+.stream__time {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.6;
+  margin-right: 8px;
+}
+
+.stream__label {
+  word-break: break-all;
+}
+
+.stream__badge {
+  margin-left: 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 0 4px;
+  opacity: 0.6;
+}
+
+.stream__raw {
+  margin: 6px 0 8px;
+  padding: 8px;
+  background: rgba(128, 128, 128, 0.12);
+  border-radius: 4px;
+  overflow-x: auto;
+  max-height: 320px;
+}
+
+.paste {
+  margin-top: 14px;
+}
+
+.paste__input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 8px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.paste__hint {
+  margin: 6px 0;
+  font-size: 11px;
+  opacity: 0.65;
+}
+
+.paste__error {
+  margin: 6px 0;
+  color: #c0392b;
+}
+
+.stream__verdict {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: #fff;
+}
+
+.stream__verdict--pass { background: #1e7d3a; }
+.stream__verdict--fail { background: #c0392b; }
+.stream__verdict--warning { background: #b26a00; }
+.stream__verdict--unknown,
+.stream__verdict--unnamed,
+.stream__verdict--no\ payload { background: #6b6b6b; }
+
+.verdict__table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+}
+
+.verdict__table th,
+.verdict__table td {
+  text-align: left;
+  padding: 3px 8px 3px 0;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+  font-weight: normal;
+}
+
+.verdict__table th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+}
+
+.verdict__row--missing td,
+.verdict__row--undefined td,
+.verdict__row--null td,
+.verdict__row--empty td,
+.verdict__row--type-mismatch td { color: #c0392b; }
+
+.verdict__row--unverifiable td,
+.verdict__row--extra td { color: #b26a00; }
+
+.verdict__required { color: #c0392b; }
+
+.verdict__note {
+  margin: 8px 0;
+  opacity: 0.75;
+}
+
+.runner {
+  margin-top: 16px;
+  border-top: 1px solid rgba(128, 128, 128, 0.35);
+  padding-top: 12px;
+}
+
+.runner h2 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.runner__controls {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.runner__controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.runner__controls span {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+}
+
+.runner__state {
+  margin: 10px 0 0;
+  font-weight: 600;
+}
+
+.runner__platform {
+  font-weight: normal;
+  opacity: 0.6;
+}
+
+.runner__confirm {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #b26a00;
+  border-radius: 4px;
+}
+
+.runner__confirm p {
+  margin: 0 0 8px;
+}
+
+.runner__confirm button {
+  margin-right: 8px;
+}
+
+.runner__failed {
+  margin: 8px 0 0;
+  color: #c0392b;
+}
+
+.runner__active {
+  opacity: 0.7;
+}
+
+.runner__results {
+  border-collapse: collapse;
+  width: 100%;
+  margin-top: 12px;
+}
+
+.runner__results th,
+.runner__results td {
+  text-align: left;
+  padding: 3px 8px 3px 0;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+  font-weight: normal;
+  vertical-align: top;
+}
+
+.runner__results th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+}
+
+.runner__result--pass td { color: #1e7d3a; }
+.runner__result--fail td { color: #c0392b; }
+.runner__result--skipped td { opacity: 0.65; }

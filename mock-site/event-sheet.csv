@@ -1,0 +1,9 @@
+Event Name,Payload,Payload Data Type,Attribute,Attribute Data Type,Mandatory,Description,Example Value
+add_to_cart,product_id,String,prid,String,Yes,Product SKU,SKU123
+,price,Number,pr,Number,Yes,Unit price,499
+,currency,String,cur,String,No,ISO 4217 code,INR
+remove_from_cart,product_id,String,prid,String,Yes,Product SKU,SKU123
+,price,Number,pr,Number,Yes,Unit price,499
+purchase,order_id,String,oid,String,Yes,Order reference,ORD-1
+,total,Number,tot,Number,Yes,Order total,499
+product_view,product_id,String,prid,String,Yes,Product SKU,SKU123

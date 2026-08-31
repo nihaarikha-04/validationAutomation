@@ -1,7 +1,9 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
+import { createChromePageDriver } from './chrome-page-driver';
 import { createChromePageEvaluator } from './chrome-page-evaluator';
+import { createChromePayloadSource } from './chrome-payload-source';
 import './panel.css';
 
 // Composition root for the panel surface. chrome.* and timers are constructed here and
@@ -18,6 +20,12 @@ const wait = (milliseconds: number): Promise<void> =>
 
 createRoot(container).render(
   <StrictMode>
-    <App evaluator={createChromePageEvaluator()} wait={wait} />
+    <App
+      evaluator={createChromePageEvaluator()}
+      wait={wait}
+      payloadSource={createChromePayloadSource()}
+      driver={createChromePageDriver()}
+      now={() => Date.now()}
+    />
   </StrictMode>,
 );

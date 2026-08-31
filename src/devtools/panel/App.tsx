@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { detectColumns } from '../../event-sheet/detect-columns';
 import { EventSheetError } from '../../event-sheet/errors';
 import { normalizeSheet } from '../../event-sheet/normalize';
@@ -10,6 +10,7 @@ import type {
   EventSheet,
   SheetGrid,
 } from '../../event-sheet/types';
+import type { CapturedPayload, PayloadSource, TransferableValue } from '../../shared/payload';
 import {
   detectAndEnableDebug,
   HOSTNAME_EXPRESSION,
@@ -17,10 +18,18 @@ import {
   type SdkStatus,
   type Wait,
 } from '../../shared/sdk';
+import type { PageDriver } from '../../automation/commands';
+import { verdictFor, type CaptureVerdict } from '../../validation/from-capture';
 import { ColumnMappingForm } from './components/ColumnMappingForm';
 import { EventTree } from './components/EventTree';
+import { PastePayloads } from './components/PastePayloads';
+import { TestRunner } from './components/TestRunner';
+import { PayloadStream } from './components/PayloadStream';
 import { SdkStatusBar } from './components/SdkStatusBar';
 import { SheetUpload } from './components/SheetUpload';
+
+/** Bounded so a long session on a chatty page cannot grow the panel's memory without limit. */
+const MAX_PAYLOADS = 500;
 
 type AmbiguousDetection = Extract<ColumnDetection, { kind: 'ambiguous' }>;
 
@@ -38,12 +47,16 @@ type SheetState =
 export interface AppProps {
   readonly evaluator: PageEvaluator;
   readonly wait: Wait;
+  readonly payloadSource: PayloadSource;
+  readonly driver: PageDriver;
+  readonly now: () => number;
 }
 
-export function App({ evaluator, wait }: AppProps) {
+export function App({ evaluator, wait, payloadSource, driver, now }: AppProps) {
   const [hostname, setHostname] = useState('');
   const [sdk, setSdk] = useState<SdkStatus | undefined>(undefined);
   const [sheetState, setSheetState] = useState<SheetState>({ kind: 'empty' });
+  const [payloads, setPayloads] = useState<readonly CapturedPayload[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,6 +79,36 @@ export function App({ evaluator, wait }: AppProps) {
       cancelled = true;
     };
   }, [evaluator, wait]);
+
+  useEffect(
+    () =>
+      payloadSource.subscribe((payload) => {
+        // Newest first, oldest discarded past the cap.
+        setPayloads((current) => [payload, ...current].slice(0, MAX_PAYLOADS));
+      }),
+    [payloadSource],
+  );
+
+  // Verdicts are derived, never stored: the sheet or the payload list changing recomputes them.
+  const verdicts = useMemo<ReadonlyMap<string, CaptureVerdict>>(() => {
+    if (sheetState.kind !== 'ready') {
+      return new Map();
+    }
+    return new Map(payloads.map((payload) => [payload.id, verdictFor(payload, sheetState.sheet)]));
+  }, [payloads, sheetState]);
+
+  const addPastedPayloads = (values: readonly TransferableValue[]): void => {
+    const at = now();
+    const pasted: CapturedPayload[] = values.map((value, index) => ({
+      id: `pasted-${at}-${index}`,
+      at,
+      args: [value],
+      raw: JSON.stringify([value]),
+      origin: 'pasted',
+    }));
+
+    setPayloads((current) => [...pasted.reverse(), ...current].slice(0, MAX_PAYLOADS));
+  };
 
   const handleFile = useCallback(async (file: File): Promise<void> => {
     try {
@@ -127,6 +170,25 @@ export function App({ evaluator, wait }: AppProps) {
       ) : null}
 
       {sheetState.kind === 'ready' ? <EventTree sheet={sheetState.sheet} /> : null}
+
+      <TestRunner
+        driver={driver}
+        sheet={sheetState.kind === 'ready' ? sheetState.sheet : undefined}
+        payloads={payloads}
+        sdkReady={sdk === undefined ? undefined : sdk.kind === 'ready'}
+        sdkDiagnostic={sdk?.kind === 'absent' ? sdk.diagnostic : undefined}
+        now={now}
+      />
+
+      <PayloadStream
+        payloads={payloads}
+        verdicts={verdicts}
+        onClear={() => {
+          setPayloads([]);
+        }}
+      />
+
+      <PastePayloads onParsed={addPastedPayloads} />
     </main>
   );
 }

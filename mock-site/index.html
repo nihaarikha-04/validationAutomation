@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Mock Store — Smartech Validator</title>
+    <style>
+      body { font: 15px/1.6 system-ui, sans-serif; margin: 0 auto; max-width: 640px; padding: 32px; }
+      h1 { font-size: 20px; }
+      .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 16px 0; }
+      button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid #888;
+               background: #fff; cursor: pointer; margin-right: 8px; }
+      .primary { background: #1e7d3a; color: #fff; border-color: #1e7d3a; }
+      .danger { background: #c0392b; color: #fff; border-color: #c0392b; }
+      code { background: #f2f2f2; padding: 1px 4px; border-radius: 3px; }
+      .note { color: #666; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <h1>Mock Store</h1>
+    <p class="note">
+      A stand-in storefront for testing the validator. Nothing here is real and no request leaves
+      the page. Open DevTools → Smartech Validator, upload
+      <code>mock-site/event-sheet.csv</code>, then drive it from the panel.
+    </p>
+
+    <div class="card">
+      <h2>Blue Running Shoes</h2>
+      <p>SKU <code>SKU123</code> — ₹499.00</p>
+
+      <!-- Strong signal: a data attribute. Detection should be confident and click without asking. -->
+      <button class="primary" data-action="add-to-cart">Add to Cart</button>
+
+      <!-- Weak signal: text only. Detection should ask before clicking. -->
+      <button>Remove</button>
+    </div>
+
+    <div class="card">
+      <h2>Checkout</h2>
+      <p class="note">Spends money in a real shop, so the panel must always confirm first.</p>
+      <button class="danger">Place order</button>
+    </div>
+
+    <div class="card">
+      <h2>Unlabelled control</h2>
+      <p class="note">
+        Nothing here names an action, so automatic detection fails and the manual picker is the
+        only way through. Run the <code>product</code> action to exercise that path.
+      </p>
+      <button id="mystery">✦</button>
+    </div>
+
+    <script>
+      // A stand-in for the Smartech SDK: it logs in exactly the format the real debugger uses,
+      // which is what the extension's capture matches on.
+      window.smartech = function (command, name, payload) {
+        if (command === 'debug') return;
+        console.log("[Smartech Debugger] Firing EVT: '" + name + "' with payload: ", payload);
+      };
+
+      const $ = (selector) => document.querySelector(selector);
+
+      $('[data-action="add-to-cart"]').addEventListener('click', () => {
+        // Complete against the sample sheet — expect PASS.
+        smartech('event', 'add_to_cart', {
+          product_id: 'SKU123',
+          price: 499,
+          currency: 'INR',
+        });
+      });
+
+      document.querySelectorAll('button').forEach((button) => {
+        if (button.textContent.trim() !== 'Remove') return;
+        button.addEventListener('click', () => {
+          // price is required by the sheet and deliberately absent — expect FAIL.
+          smartech('event', 'remove_from_cart', { product_id: 'SKU123' });
+        });
+      });
+
+      $('.danger').addEventListener('click', () => {
+        smartech('event', 'purchase', { order_id: 'ORD-1', total: 499 });
+      });
+
+      $('#mystery').addEventListener('click', () => {
+        smartech('event', 'product_view', { product_id: 'SKU123' });
+      });
+    </script>
+  </body>
+</html>

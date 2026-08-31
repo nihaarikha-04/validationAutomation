@@ -100,3 +100,267 @@ EventSchema { name, fields: FieldSchema[] }
   is the channel the MVP validates.
 - Phase 3 validates the payload side. Phase 7 validates the attribute side and reuses the same engine,
   which is why the validator must take a plain object rather than "a debug event".
+
+---
+
+## D5 — Capture runs from two content scripts, and that ends the zero-permission manifest
+
+D1 established that the panel is a viewer, not a runtime: it cannot be opened by script and may
+not exist when events fire. Interception therefore has to run in the page at `document_start`,
+which means content scripts.
+
+**Two of them, because they need different worlds:**
+
+| Script | World | Why |
+|---|---|---|
+| `content/interceptor.js` | `MAIN` | Must see the page's real `window.smartech`. An isolated-world script sees a different global object entirely. |
+| `content/bridge.js` | `ISOLATED` | `chrome.*` does not exist in the MAIN world, so the interceptor cannot message the extension itself. |
+
+They communicate by `window.postMessage`, marked with `smartech-validator/payload` so page traffic
+is ignored. The bridge imports nothing at all: the content bundle is built without code splitting,
+and any shared import would emit a chunk that a classic content script cannot load.
+
+**The honest cost:** the `permissions` and `host_permissions` keys are still absent, but
+`"matches": ["<all_urls>"]` grants host access on its own. Chrome will show "Read and change all your
+data on all websites". **The extension is no longer unprivileged, and claiming otherwise because the
+permissions array is empty would be false.**
+
+`<all_urls>` was chosen because the tool exists to test whichever client site the QA engineer is on;
+an allowlist would need editing before every engagement. The tighter alternative — `optional_host_permissions`
+plus `chrome.scripting.registerContentScripts` once the user grants a specific origin — is a real
+option if this is ever distributed more widely. Revisit at Phase 6's security pass.
+
+**Panel delivery:** content script → `chrome.runtime.sendMessage` → the panel's `onMessage` listener,
+filtered on `sender.tab.id === chrome.devtools.inspectedWindow.tabId`. No service worker: runtime
+messages already reach every listening extension context, and a relay would be unused indirection.
+
+**Known gap, deliberate:** payloads fired while the panel is closed are lost. D1 anticipates buffering
+and replay; nothing in Phase 2 needs it, and Phase 4 drives the actions from the panel itself, so the
+panel is open by construction. Build it when a phase actually requires it.
+
+---
+
+## D6 — Interception wraps with a Proxy behind an accessor
+
+Two problems shaped this.
+
+**The SDK may not exist yet.** At `document_start` `window.smartech` is usually undefined, and the
+snippet defines it later. So the wrapper is installed as an accessor: the getter always returns our
+wrapper, and the setter captures whatever the site assigns. That also covers the second open
+question — if the SDK redefines `window.smartech` after load, the setter simply re-targets, and
+interception survives. There is a test for exactly that.
+
+**A plain wrapper function would break the queuing stub.** The common snippet pattern stores buffered
+calls on the callable itself (`smartech.q`). A wrapper function has no such property, so the real SDK
+would later drain an empty queue and the site would silently lose its own early events. The wrapper is
+therefore a `Proxy` forwarding `get`/`set`/`has`/`apply` to the real SDK. Its shell is an arrow
+function, which has no `prototype` — a normal function's non-configurable `prototype` would violate a
+Proxy invariant when traps forward elsewhere.
+
+**Capture must never break the site.** If reporting throws, the call still forwards to the real SDK;
+the error is rethrown on a clean stack via `setTimeout` so it surfaces in the console rather than being
+swallowed. Site behaviour wins; the failure is still loud.
+
+**Still open, and not answerable from here:** whether *this client's* snippet actually uses a queuing
+stub, and whether it reinitialises. `docs/smartech-snippet-probe.js` answers both against the live
+site. The interceptor is written to be correct either way, so the answer refines D2's "detected"
+wording — it does not change the design.
+
+
+---
+
+## D7 — Payload serialisation is bounded, not just cycle-safe
+
+**Found on a live site**, not in tests: `postMessage` threw
+`RangeError: Maximum call stack size exceeded` and the capture was lost.
+
+Cycle detection alone was not enough. `toTransferable` guarded against an object appearing twice on
+one path, but nothing stopped it walking something merely *enormous* — and the per-key `try/catch`
+turned the eventual stack overflow into tags, so serialisation "succeeded" and handed `postMessage` a
+structure it could not clone.
+
+**Bounds now applied:** depth 12, 200 keys per object, 500 array items, each truncation recorded as a
+tag rather than silently dropped. DOM nodes and the global object are tagged by name and never walked
+— they are never the payload and are the main source of explosive graphs.
+
+**Belt and braces:** if `postMessage` still refuses a payload, the interceptor posts a degraded record
+carrying the error instead of nothing, so a capture failure shows up in the stream as a visible gap.
+
+**What this confirmed about D6:** the site's own `smartech()` call still forwarded correctly throughout.
+Routing capture failures through `setTimeout` kept the failure loud while leaving the site's tracking
+intact — which is the behaviour that mattered most.
+
+
+---
+
+## D8 — The wrapper must be falsy until the site installs its SDK
+
+**Found on a live site**, as an infinite recursion inside the Proxy's `get` trap.
+
+The near-universal Smartech snippet idiom is:
+
+```js
+window.smartech = window.smartech || function () { (window.smartech.q = window.smartech.q || []).push(arguments) };
+```
+
+D6's getter returned the wrapper unconditionally, and a Proxy is **truthy**. So `window.smartech || …`
+took the *left* branch and assigned our own wrapper straight back to us. Two failures at once:
+
+1. `target` became the Proxy itself, so every property read re-entered the `get` trap until the stack
+   gave out.
+2. **The site never installed its SDK at all.** The `||` never reached its right-hand side — we broke
+   the tracking we exist to observe, which is the one thing D6 set out to guarantee.
+
+**The corrected contract:**
+
+- The getter returns `undefined` while `target` is undefined, so the `||` idiom takes its right branch
+  and the site installs its own stub or SDK exactly as it would with no extension present.
+- The setter ignores an assignment of the wrapper itself, so `window.smartech = window.smartech` can
+  never make the wrapper its own target.
+- Traps no longer forward `receiver`. Passing the proxy through would run the SDK's own getters with
+  `this` bound to the proxy, routing their internal reads back through the traps — a recursion source
+  capture does not need.
+
+**Lesson worth keeping:** "wrap, never replace" is not only about forwarding calls. A wrapper that is
+merely *present* changes behaviour when the page tests for presence. Both live bugs in this phase (D7
+and D8) came from the page doing something the fixtures never did.
+
+
+---
+
+## D9 — A delegation bounce is identified by its arguments, not by counting
+
+**Confirmed live.** The client's SDK captures `window.smartech` and delegates back into it, so
+wrapper → SDK → wrapper cycles. The first attempt at containing this capped forward depth at 4 — and
+the symptom that produced was one click on Add to Cart recording `add_to_cart` **four times**. Exactly
+the cap. The guard stopped the crash and turned it into silent data corruption instead: four identical
+payloads, which Phase 3 would have validated as four separate events.
+
+**Depth was the wrong signal.** A bounce always re-enters with the *same argument values* as a frame
+that is still open, whereas a site genuinely calling smartech from inside a smartech callback carries
+different arguments and must still be captured. Comparing argument identity against the open call
+stack separates the two exactly, with no counting and no arbitrary limit.
+
+On a bounce the wrapper returns `undefined` without forwarding or reporting. That is also the correct
+value: the delegation expects to reach the queuing stub, which returns nothing.
+
+The depth cap survives as a backstop for a cycle that mutates its arguments between hops, and reports
+a visible diagnostic if it ever fires.
+
+**Lesson:** the guard that stops a crash is not automatically the guard that keeps the data correct. A
+depth limit converted a loud failure into a quiet one, and only the "4 times" observation revealed it.
+
+
+---
+
+## D10 — Capture the debug log, not the `smartech` function
+
+**Supersedes D6, D8 and D9.** Those three describe successive attempts to wrap `window.smartech`
+safely. All three failed on the live site, each in a different way, and the third failure was the
+decisive one: `smartech('create', …)` and `smartech('register', …)` stopped executing, so the SDK
+never initialised and its versioning request never fired.
+
+**Why wrapping could not be made safe.** The snippet's queuing stub buffers calls on the function
+object itself (`smartech.q`). Our Proxy forwarded property reads to whatever `target` currently was,
+so when the real SDK assigned itself, `target` flipped and the queue — which lived on the *stub* —
+became unreachable. The buffered `create`/`register` calls were dropped silently.
+
+That is not a bug with a fix so much as a category error. Any accessor or proxy over `window.smartech`
+changes object identity that the snippet depends on, and the dependency lives in SDK internals we
+cannot see. Three live failures in one phase is enough evidence.
+
+**The replacement.** The SDK already prints what we want:
+
+```
+[Smartech Debugger] Firing EVT: 'Add to Cart' with payload:  {…}
+```
+
+So capture wraps `console.log/info/debug/warn` in the page's world, forwards every call untouched, and
+records those lines whose first argument carries the Smartech prefix. `window.smartech` is not touched
+at all.
+
+**Why this is better, not merely safer:**
+
+- It cannot break SDK initialisation. Nothing Smartech does depends on `console`'s identity.
+- It captures the object the Event Sheet actually describes. Per the project's own terminology, a
+  *payload* is "what you get in the debug logs" — the wrapper was capturing the call *arguments*, one
+  step upstream, before the SDK's own enrichment. This resolves that open question by construction.
+- The event name comes from the log line itself, so it no longer has to be inferred from argument
+  positions.
+
+**What it costs.** Capture now depends on debug mode being enabled — which is what the D2 detection
+call is for — and on the log's prefix format. If Smartech changes that prefix, capture goes quiet
+rather than wrong; a phase that needs certainty should assert on the first captured line.
+
+
+---
+
+## D11 — Validation engine shape
+
+**Input is a plain object.** `validateEvent(payload, schema, timestamp, options)` takes a value, not a
+`CapturedPayload`, and the timestamp is passed in rather than read from a clock. Phase 7 can feed it
+decoded network attributes without the engine knowing where they came from.
+
+**`ValidationResult.fields`, not `attributes`.** The plan specified the key as `attributes`, but that
+predates the terminology fix: *attribute* now means the network-channel name specifically, so an
+`attributes` array holding payload results would reintroduce the ambiguity we removed. Everything else
+matches the specified shape — status, missing, extra, nullValues, emptyValues, typeMismatches, raw,
+timestamp. A rename is one line if the export format needs the literal spec key.
+
+**A sixth field status: `unverifiable`.** Phase 2's serialiser bounds (D7) replace clipped or cyclic
+values with tags. Treating those as type mismatches would manufacture defects the site does not have,
+so they warn instead of failing. The site may well be correct there; we simply cannot see.
+
+**Verdict rules:**
+
+| Condition | Verdict |
+|---|---|
+| Required field missing, undefined, null or empty | FAIL |
+| Any type mismatch, required or optional | FAIL |
+| Extra fields, policy `fail` | FAIL |
+| Optional field present but null or empty | WARNING |
+| A value we could not verify | WARNING |
+| Extra fields, policy `warn` (default) | WARNING |
+| Everything else, including a missing *optional* field | PASS |
+
+A missing optional field is silent by design — it is normal, and warning about it would bury the
+warnings that matter. A type mismatch fails regardless of whether the field was required: the site sent
+something, and it sent the wrong shape.
+
+**`extra` is always populated; the policy governs only the verdict.** `ignore` means "do not fail or
+warn", not "do not tell me".
+
+**Extra detection.** A payload leaf counts as covered when the sheet names it *or any ancestor* — a
+sheet declaring `product` as an object vouches for everything inside it. Array indices are erased
+before comparison, so `items[0].price` in the sheet covers `items[3].price` in the payload.
+
+**Open question — array paths.** A sheet path of `items[0].price` is read literally: element 0 only.
+If real sheets mean "every element", index 0 passing while index 3 is malformed would be a false PASS.
+Deciding this needs a real sheet that uses array notation; wildcard support (`items[].price`) is a
+small change once we know. Flagged rather than guessed.
+
+
+---
+
+## D12 — Page → extension handoff runs over a private DOM event
+
+**Found on an unrelated site.** `netcore.freshdesk.com` threw `Invalid Origin` from inside our capture
+wrapper. That page overrides `window.postMessage` — or rejects unexpected messages — and because we
+inject on `<all_urls>` and it logged a `[Smartech…]`-prefixed line, we posted into its message channel.
+
+`window.postMessage` is a **shared** channel: every listener on the page receives what we send, and the
+page can replace the function itself. Using it made our internal handoff visible to, and breakable by,
+sites we have no business affecting.
+
+Capture now dispatches a `CustomEvent` named `smartech-validator:payload` on `document`, and the bridge
+listens for exactly that. No page listens for it, and nothing we do reaches a page's message handlers.
+
+**The detail is a JSON string, not an object.** The page and the extension run in separate JavaScript
+heaps, and an object `detail` is not reliably readable from the isolated world.
+
+**Wider point this exposed:** `<all_urls>` (D5) means every design choice in the content scripts is a
+choice we impose on every site the user visits. The failure here was noisy rather than harmful — the
+error was already routed through `setTimeout`, so the page kept working — but "we only act on Smartech
+lines" was not as narrow as it sounded, because deciding whether a line is ours already required running
+our code on every log statement everywhere. Worth weighing at Phase 6's security pass, alongside the
+`optional_host_permissions` alternative.
