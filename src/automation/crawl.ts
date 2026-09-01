@@ -99,6 +99,7 @@ export interface SweepOutcome {
   readonly skippedAsRepeats: number;
   /** Where a click took us, when one navigated. That page has not been swept yet. */
   readonly navigatedTo: string | undefined;
+
   /**
    * Routes the page showed without loading — quick-views and overlays that push a URL. Their
    * controls were swept in place, but they are worth naming, and worth visiting properly later
@@ -114,6 +115,35 @@ export interface SweepOutcome {
 }
 
 /**
+ * What a sweep remembers between visits.
+ *
+ * `clickedHere` belongs to one page: which of its controls have been spent, by an identity that
+ * survives the page being left and reopened. `groups` belongs to the **whole crawl**, and that
+ * distinction is the point — a navbar is the same component on every page, so learning that its
+ * links produce nothing new has to carry from one page to the next.
+ *
+ * Held as mutable collections the crawler owns and passes in, rather than copied back and forth
+ * through the outcome. There is one writer at a time; a sweep never runs concurrently with another.
+ */
+export interface GroupMemory {
+  /** Distinct events each kind of control has produced, anywhere on the site. */
+  readonly produced: Map<string, Set<string>>;
+  /** Consecutive clicks on a kind of control that produced nothing new. */
+  readonly barren: Map<string, number>;
+  /** Clicks spent on each kind of control. */
+  readonly tried: Map<string, number>;
+}
+
+export function newGroupMemory(): GroupMemory {
+  return { produced: new Map(), barren: new Map(), tried: new Map() };
+}
+
+export interface SweepMemory {
+  readonly clickedHere: Set<string>;
+  readonly groups: GroupMemory;
+}
+
+/**
  * Clicks everything clickable on the current page and records what each click produced.
  *
  * The page is re-listed every round rather than enumerated once: the first click often opens a
@@ -122,16 +152,14 @@ export interface SweepOutcome {
 export async function sweepPage(
   deps: SweepDeps,
   budget: number = Number.POSITIVE_INFINITY,
+  memory: SweepMemory = { clickedHere: new Set(), groups: newGroupMemory() },
 ): Promise<SweepOutcome> {
   const observations: Observation[] = [];
   const captured: CapturedPayload[] = [];
+  /** Element ids, exact within this page load — the precise check while the document lives. */
   const visited = new Set<string>();
-  /** The distinct events each kind of control has produced so far. */
-  const produced = new Map<string, Set<string>>();
-  /** Consecutive clicks on a kind of control that produced nothing we had not already seen. */
-  const barren = new Map<string, number>();
-  /** Clicks already spent on each kind of control. */
-  const tried = new Map<string, number>();
+  const spent = memory.clickedHere;
+  const { produced, barren, tried } = memory.groups;
   let unreachable = 0;
   let skippedAsRepeats = 0;
   const routesSeen = new Set<string>();
@@ -207,10 +235,28 @@ export async function sweepPage(
     framesSeen = Math.max(framesSeen, listing.framesSeen);
     frames = deps.driver.knownFrames?.() ?? [];
 
-    const available = listing.clickables.filter(
-      (entry) => deps.allowed(entry.risk) && !visited.has(frameKey(entry)),
+    const keyed = withStableKeys(listing.clickables);
+    const available = keyed.filter(
+      (entry) =>
+        deps.allowed(entry.risk) &&
+        // Two identities, deliberately. The element id is exact while this document lives; the
+        // stable key is the only thing that survives navigating away and coming back.
+        !visited.has(frameKey(entry)) &&
+        !spent.has(entry.stableKey),
     );
-    const next = available.find((entry) => !exhausted(entry.group));
+    const worthClicking = available.filter((entry) => !exhausted(entry.group));
+
+    /**
+     * Everything that stays on this page, before anything that leaves it.
+     *
+     * Document order alone put the navbar first on every page, and a navbar link navigates — which
+     * ends the sweep. So each page spent its clicks walking the header away to somewhere else and
+     * never reached its own body: no Add to Cart, no quantity control, no tab, no accordion. The
+     * page's own buttons are the ones its events hang off, so they go first, and links are what
+     * the crawl follows once there is nothing left to do here.
+     */
+    const next =
+      worthClicking.find((entry) => entry.risk !== 'navigates') ?? worthClicking[0];
     if (next === undefined) {
       // Nothing left to click here. If a click opened an overlay, closing it may reveal the page
       // underneath — so try that once, then stop if it changes nothing.
@@ -224,6 +270,7 @@ export async function sweepPage(
     }
     justDismissed = false;
     visited.add(frameKey(next));
+    spent.add(next.stableKey);
     tried.set(next.group, (tried.get(next.group) ?? 0) + 1);
     deps.onProgress(`Click ${visited.size}: ${next.label}`);
 
@@ -398,54 +445,112 @@ export interface CrawlOutcome {
  * Navigation is deliberate rather than incidental: outbound-link clicking stays switched off
  * during a sweep, so the only way the crawler leaves a page is by choosing to.
  */
+/**
+ * Sweeps a site depth-first, finishing every page it opens before returning to the one that
+ * opened it.
+ *
+ * The previous shape abandoned a page the moment a click navigated: the new page went to the
+ * front of the queue and the old one, already in `seen`, was never opened again. On a storefront
+ * the first link click navigates, so almost every page contributed exactly one click before being
+ * dropped — which is why a crawl looked like it was barely moving.
+ *
+ * Now a page that navigates is pushed onto a stack. The page it landed on is swept to exhaustion,
+ * then popped, and the page underneath resumes from the control after the one that took it away.
+ * Resumption works because `sweepPage` is handed the reload-stable keys of everything already
+ * clicked there — see `withStableKeys`.
+ */
 export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
   const start = await deps.driver.send({ kind: 'location' });
   if (start.kind !== 'location') {
     return { pages: [], captured: [], stopped: 'Could not read the current page address.' };
   }
 
-  const queue: string[] = [start.url];
-  const seen = new Set<string>([normalise(start.url)]);
-  const pages: PageResult[] = [];
+  /** Pages found but not yet opened, in the order they were found. */
+  const queue: string[] = [];
+  const queued = new Set<string>([normalise(start.url)]);
+  /** Pages opened and not yet exhausted, deepest last. */
+  const stack: string[] = [start.url];
+  const onStack = new Set<string>([normalise(start.url)]);
+  /**
+   * Clicks already spent per page, surviving the page being left and reopened. Keyed by page
+   * rather than by stack entry so a cycle — A opens B, B opens A — resumes A rather than
+   * restarting it, which would otherwise loop forever.
+   */
+  const spentPerPage = new Map<string, Set<string>>();
+  /**
+   * What each kind of control is worth, learned once for the whole crawl.
+   *
+   * Rebuilt per sweep, this was the reason a crawl circled the navbar: every page — and every
+   * resumed visit to a page — started with an empty record, so a navbar's links were clicked in
+   * full again and again, each one costing a navigation away and a navigation back. Carrying it
+   * means the group retires after a couple of barren tries and stays retired.
+   */
+  const groups = newGroupMemory();
+  /** One result per page, merged across however many visits it took to exhaust it. */
+  const results = new Map<string, PageResult>();
   const captured: CapturedPayload[] = [];
   let currentUrl = start.url;
 
   const pageLimit = deps.maxPages > 0 ? deps.maxPages : Number.POSITIVE_INFINITY;
   const clickLimit = deps.clicksPerPage > 0 ? deps.clicksPerPage : Number.POSITIVE_INFINITY;
 
-  while (queue.length > 0 && pages.length < pageLimit) {
+  const enqueue = (urls: readonly string[]): void => {
+    for (const found of urls) {
+      const key = normalise(found);
+      if (!queued.has(key)) {
+        queued.add(key);
+        queue.push(found);
+      }
+    }
+  };
+
+  while (stack.length > 0 || queue.length > 0) {
     if (deps.isCancelled()) {
-      return { pages, captured, stopped: 'Stopped.' };
+      return { pages: [...results.values()], captured, stopped: 'Stopped.' };
     }
 
-    const url = queue.shift();
+    // Nothing part-finished, so start the next page we know about — provided we may open another.
+    if (stack.length === 0) {
+      if (results.size >= pageLimit) {
+        break;
+      }
+      const next = queue.shift();
+      if (next === undefined) {
+        break;
+      }
+      stack.push(next);
+      onStack.add(normalise(next));
+    }
+
+    const url = stack[stack.length - 1];
     if (url === undefined) {
       break;
     }
+    const key = normalise(url);
 
-    // Only navigate if we are not already there — a click may have taken us to this very page.
-    if (normalise(url) !== normalise(currentUrl)) {
-      deps.onProgress(`Opening page ${pages.length + 1}${describeLimit(pageLimit)}: ${url}`);
+    // Only navigate if we are not already there — a click may have taken us to this very page,
+    // and reloading would throw away the state that click produced.
+    if (key !== normalise(currentUrl)) {
+      const resuming = spentPerPage.has(key);
+      deps.onProgress(
+        resuming
+          ? `Returning to ${url} to finish it`
+          : `Opening page ${results.size + 1}${describeLimit(pageLimit)}: ${url}`,
+      );
       await deps.driver.send({ kind: 'navigate', url });
 
       if (!(await waitForPage(deps))) {
-        return { pages, captured, stopped: `Gave up waiting for ${url} to load.` };
+        return {
+          pages: [...results.values()],
+          captured,
+          stopped: `Gave up waiting for ${url} to load.`,
+        };
       }
     }
     currentUrl = url;
 
     // Links are read *before* clicking anything. A click can navigate or break the page, and
     // collecting the queue afterwards meant one bad click ended the whole crawl at page one.
-    const enqueue = (urls: readonly string[]): void => {
-      for (const found of urls) {
-        const key = normalise(found);
-        if (!seen.has(key)) {
-          seen.add(key);
-          queue.push(found);
-        }
-      }
-    };
-
     const links = await deps.driver.send({ kind: 'links' });
     let linksFound = 0;
     if (links.kind === 'links') {
@@ -453,8 +558,16 @@ export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
       enqueue(links.urls);
     }
 
-    deps.onProgress(`Sweeping page ${pages.length + 1}${describeLimit(pageLimit)}: ${url}`);
-    const outcome = await sweepPage(deps, clickLimit);
+    let clickedHere = spentPerPage.get(key);
+    if (clickedHere === undefined) {
+      clickedHere = new Set<string>();
+      spentPerPage.set(key, clickedHere);
+    }
+
+    deps.onProgress(`Sweeping ${url}`);
+    // The sweep adds to both sets as it goes: this page's spent controls, and the crawl-wide
+    // record of what each kind of control is worth clicking.
+    const outcome = await sweepPage(deps, clickLimit, { clickedHere, groups });
     captured.push(...outcome.captured);
 
     // Links again, now that the sweep has opened menus and overlays. Gathering only beforehand
@@ -468,31 +581,62 @@ export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
     // A route the page showed as an overlay is worth loading properly: the same URL can behave
     // differently, and fire different events, when it is a page rather than a panel.
     enqueue(outcome.routesSeen);
-    pages.push({
-      url,
-      observations: outcome.observations,
-      stopped: outcome.stopped,
-      linksFound,
-      skippedAsRepeats: outcome.skippedAsRepeats,
-      routesSeen: outcome.routesSeen,
-      unreachableFrames: outcome.unreachableFrames,
-      framesSeen: outcome.framesSeen,
-      frames: outcome.frames,
-    });
+    results.set(key, mergeResult(results.get(key), { url, linksFound, outcome }));
 
-    // A click took us somewhere. Sweep it next, before working back through the queue — that is
-    // how a product tile leads to the product page, and its Add to Cart button.
-    if (outcome.navigatedTo !== undefined) {
-      currentUrl = outcome.navigatedTo;
-      const key = normalise(outcome.navigatedTo);
-      if (!seen.has(key)) {
-        seen.add(key);
-        queue.unshift(outcome.navigatedTo);
-      }
+    // A page that died mid-sweep is recorded and dropped, not fatal: one broken page must not
+    // end a crawl that still has a queue. Cancellation is caught by the check at the top of the
+    // loop instead, which is the only thing that should stop everything.
+    if (outcome.stopped !== undefined) {
+      stack.pop();
+      onStack.delete(key);
+      continue;
+    }
+
+    if (outcome.navigatedTo === undefined) {
+      // Every control here has been clicked. Drop it and let whatever opened it resume.
+      stack.pop();
+      onStack.delete(key);
+      continue;
+    }
+
+    currentUrl = outcome.navigatedTo;
+    const landed = normalise(outcome.navigatedTo);
+
+    // Descend, unless we have looped back onto a page already part-finished further up the stack
+    // — in which case this page stays put and the next round navigates back to it.
+    if (!onStack.has(landed) && results.size < pageLimit) {
+      stack.push(outcome.navigatedTo);
+      onStack.add(landed);
+      queued.add(landed);
     }
   }
 
-  return { pages, captured, stopped: undefined };
+  return { pages: [...results.values()], captured, stopped: undefined };
+}
+
+/**
+ * Folds a fresh visit into whatever the earlier visits to this page found.
+ *
+ * A page swept across three visits is still one page, and reporting it three times would make a
+ * thorough crawl look like it was going in circles.
+ */
+function mergeResult(
+  previous: PageResult | undefined,
+  visit: { url: string; linksFound: number; outcome: SweepOutcome },
+): PageResult {
+  const { url, linksFound, outcome } = visit;
+
+  return {
+    url,
+    observations: [...(previous?.observations ?? []), ...outcome.observations],
+    stopped: outcome.stopped ?? previous?.stopped,
+    linksFound: Math.max(previous?.linksFound ?? 0, linksFound),
+    skippedAsRepeats: (previous?.skippedAsRepeats ?? 0) + outcome.skippedAsRepeats,
+    routesSeen: [...new Set([...(previous?.routesSeen ?? []), ...outcome.routesSeen])],
+    unreachableFrames: Math.max(previous?.unreachableFrames ?? 0, outcome.unreachableFrames),
+    framesSeen: Math.max(previous?.framesSeen ?? 0, outcome.framesSeen),
+    frames: outcome.frames.length > 0 ? outcome.frames : (previous?.frames ?? []),
+  };
 }
 
 /**
@@ -582,6 +726,35 @@ async function askFormNeeds(
 /** Ids are per-document, so a frame's number is part of a control's identity. */
 function frameKey(entry: FrameClickable): string {
   return `${entry.frameId}:${entry.selector}`;
+}
+
+interface KeyedClickable extends FrameClickable {
+  /** Identity derived from what the control *is*, so it survives a page reload. */
+  readonly stableKey: string;
+}
+
+/**
+ * Names each control by what it is rather than by the id we stamped on it.
+ *
+ * Frame, kind and label, plus an ordinal for the repeats a grid produces. Reloading a page hands
+ * back the same DOM in the same order, so the same control gets the same key — which is what lets
+ * a crawl leave a page, exhaust the one it landed on, and come back to finish the first.
+ *
+ * Deliberately used *alongside* the element id rather than instead of it: within one page load
+ * the id is exact, and a re-render that reorders the list would make ordinals drift. The stable
+ * key is only asked to survive a reload, which is the one thing the id cannot do.
+ */
+export function withStableKeys(
+  clickables: readonly FrameClickable[],
+): readonly KeyedClickable[] {
+  const counts = new Map<string, number>();
+
+  return clickables.map((entry) => {
+    const base = `${entry.frameId}|${entry.group}|${entry.label}`;
+    const ordinal = counts.get(base) ?? 0;
+    counts.set(base, ordinal + 1);
+    return { ...entry, stableKey: `${base}#${ordinal}` };
+  });
 }
 
 /** Polls until the content script on the new page answers, or the wait runs out. */

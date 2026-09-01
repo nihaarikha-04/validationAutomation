@@ -780,6 +780,54 @@ superseded by D10).
 - *Worth noting for whoever reads the earlier overlay work:* none of the overlay handling was wrong.
   Enumeration, lazy dismissal and route capture all did their job. The controls were found and then
   discarded by a filter, which is why it read as "overlays are not tracked".
+- **The crawl is now depth-first, and finishes a page it left (2026-09-01).** It was abandoning
+  almost every page after a single click, which is why it looked like it was barely moving.
+  - *What was wrong:* `sweepPage` returns the moment a click causes a real page load, and the
+    crawler put the new page at the front of the queue. The page it came from was already in
+    `seen`, so it was never opened again — every control after the one that navigated was dropped.
+    On a storefront the first link click navigates, so most pages contributed exactly one click.
+  - *What it does now:* a page that navigates goes on a **stack**. The page it landed on is swept
+    to exhaustion, then popped, and the page underneath is reopened and resumes from the control
+    after the one that took it away. Clicking a tile now reaches the product page, sweeps all of
+    it, and comes back for the next tile.
+  - *What made resumption possible:* control identity that survives a reload. `data-sv-id` is
+    stamped per page load, so returning to a page renamed every control — the sweep would have
+    restarted at the top, clicked the same link, and navigated away again forever. `withStableKeys`
+    names a control by frame, kind and label plus an ordinal for repeats, which the same DOM
+    reproduces on every load. **Both identities are used together**: the element id stays the exact
+    check while a document lives, and the stable key is asked only to survive a reload, since a
+    re-render that reorders the list would drift the ordinals.
+  - *Cycles terminate.* Clicks spent are held per page URL rather than per stack entry, so A → B → A
+    resumes A rather than restarting it. A page already on the stack is not pushed again; the crawl
+    simply navigates back to it on the next round.
+  - *A page swept over several visits is reported once*, with its observations merged. Reporting it
+    once per visit would make a thorough crawl look like it was going in circles.
+  - *A page that dies mid-sweep is no longer fatal* — it is recorded and popped, and the crawl
+    carries on with its queue. Only cancellation stops everything. A test that had pinned the old
+    "already there, so do not navigate" rule was updated: not re-navigating to the page a click
+    landed on still holds, but navigating *back* is now expected and is the point of the change.
+- **The crawl circled the navbar and never reached a page's own buttons. Two causes, both fixed
+  (2026-09-02).**
+  1. **Controls were picked in document order, and the navbar is always first.** A navbar link is
+     classified `navigates`, and a navigating click ends the sweep — so every page spent its clicks
+     walking the header away to somewhere else and never got to its own body. No Add to Cart, no
+     quantity control, no tab, no accordion, none of the controls the sheet's events actually hang
+     off. The sweep now takes **everything that stays on the page before anything that leaves it**:
+     the page's own buttons first, links last, which is also what makes the depth-first descent
+     meaningful — a page is finished before the crawl follows it anywhere.
+  2. **Group memory was rebuilt on every sweep.** `produced`, `barren` and `tried` were locals of
+     `sweepPage`, so they reset on every page *and* on every resumed visit to a page. The navbar is
+     the same component sitewide, so its links were clicked in full again and again, each costing a
+     navigation away and a navigation back — which is what the circling looked like. That state is
+     now a `GroupMemory` the crawl owns for its whole life and passes in, so a group that stops
+     producing new events retires once and stays retired.
+  - *Consequence worth stating:* a group is retired on evidence, not on a name. Nothing in here
+     knows what a navbar is — it is `BARREN_TRIES` clicks with no new event, applied to any kind of
+     control. A header whose links each fire a distinct `Sidebar Nav Clicked` payload keeps being
+     clicked, which is the desired behaviour.
+  - *A fixture that fired no events had to be corrected rather than the code:* it clicked three
+    controls of one group and expected all three to be tried, which the barren rule now correctly
+    refuses. Firing a distinct event per click — what a real page does — restored it.
 - *Not yet done from this phase's checklist:* the dashboard shows the run's own totals but is not
   wired to the SDK/debug status bar as a single view; the two still render separately.
 

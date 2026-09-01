@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CapturedPayload } from '../shared/payload';
 import type { AutomationCommand, AutomationReply, PageDriver } from './commands';
-import { crawlSite, sweepPage, type SweepDeps } from './crawl';
+import { crawlSite, newGroupMemory, sweepPage, withStableKeys, type SweepDeps } from './crawl';
 
 const NOW = 4_000_000;
 
@@ -775,7 +775,7 @@ describe('crawlSite', () => {
   it('does not navigate when a click already took it to the next page', async () => {
     let here = 'https://shop.test/';
     let document = 'doc-1';
-    let navigations = 0;
+    const navigatedTo: string[] = [];
     let clicked = false;
 
     const driver: PageDriver = {
@@ -802,7 +802,7 @@ describe('crawlSite', () => {
             document = 'doc-2';
             return Promise.resolve({ kind: 'clicked' });
           case 'navigate':
-            navigations += 1;
+            navigatedTo.push(command.url);
             here = command.url;
             return Promise.resolve({ kind: 'navigating' });
           default:
@@ -813,8 +813,10 @@ describe('crawlSite', () => {
 
     await crawlSite({ ...deps(driver), maxPages: 2, clicksPerPage: 0 });
 
-    // Reloading a page we are already on would lose whatever state the click produced.
-    expect(navigations).toBe(0);
+    // Reloading a page we are already on would lose whatever state the click produced, so the
+    // page the click landed on is swept in place. Navigating *back* to finish the first page is
+    // expected and is what makes the crawl depth-first.
+    expect(navigatedTo).not.toContain('https://shop.test/next');
   });
 
   it('never visits the same page twice', async () => {
@@ -1026,5 +1028,224 @@ describe('crawlSite', () => {
     });
 
     expect(outcome.stopped).toContain('Gave up waiting');
+  });
+});
+
+describe('finishing a page after a click leaves it', () => {
+  /**
+   * Two pages. The home page has three controls; the second navigates away. The site the crawl
+   * lands on has one control of its own.
+   *
+   * What a correct crawl does: click Home-1, click Home-2 (which navigates), sweep the whole of
+   * /product, come back to home, and click Home-3.
+   */
+  function twoPageSite() {
+    const clicks: string[] = [];
+    const navigatedTo: string[] = [];
+    let here = 'https://shop.test/';
+    let document = 'doc-home';
+
+    const controlsFor = (url: string) =>
+      url === 'https://shop.test/'
+        ? [
+            { selector: '#h1', label: 'Home 1', risk: 'safe' as const, group: 'button.home' },
+            { selector: '#h2', label: 'Home 2', risk: 'safe' as const, group: 'button.home' },
+            { selector: '#h3', label: 'Home 3', risk: 'safe' as const, group: 'button.home' },
+          ]
+        : [{ selector: '#p1', label: 'Product 1', risk: 'safe' as const, group: 'button.pdp' }];
+
+    const driver: PageDriver = {
+      send: (command) => {
+        switch (command.kind) {
+          case 'location':
+            return Promise.resolve({ kind: 'location', url: here, stamp: document });
+          case 'links':
+            return Promise.resolve({ kind: 'links', urls: [] });
+          case 'clickables':
+            return Promise.resolve({ kind: 'clickables', clickables: controlsFor(here) });
+          case 'click': {
+            const label = controlsFor(here).find((c) => c.selector === command.selector)?.label;
+            clicks.push(label ?? command.selector);
+            if (label === 'Home 2') {
+              here = 'https://shop.test/product';
+              document = 'doc-product';
+            }
+            return Promise.resolve({ kind: 'clicked' });
+          }
+          case 'navigate':
+            navigatedTo.push(command.url);
+            here = command.url;
+            document = command.url === 'https://shop.test/' ? 'doc-home-2' : 'doc-product-2';
+            return Promise.resolve({ kind: 'navigating' });
+          default:
+            return Promise.resolve({ kind: 'dismissed' });
+        }
+      },
+    };
+
+    /** A distinct event per click, so no control group is retired as barren mid-test. */
+    const payloadsSince = (): readonly CapturedPayload[] => [
+      {
+        id: `p${clicks.length}`,
+        at: NOW,
+        eventName: `evt-${clicks.length}`,
+        args: [],
+        raw: '[]',
+        origin: 'intercepted',
+      },
+    ];
+
+    return { driver, payloadsSince, clicks: () => clicks, navigatedTo: () => navigatedTo };
+  }
+
+  it('sweeps the page a click landed on, then returns and finishes the first', async () => {
+    const site = twoPageSite();
+
+    await crawlSite({ ...deps(site.driver, { payloadsSince: site.payloadsSince }), maxPages: 5, clicksPerPage: 0 });
+
+    expect(site.clicks()).toEqual(['Home 1', 'Home 2', 'Product 1', 'Home 3']);
+  });
+
+  it('navigates back to the page it left, rather than abandoning it', async () => {
+    const site = twoPageSite();
+
+    await crawlSite({ ...deps(site.driver, { payloadsSince: site.payloadsSince }), maxPages: 5, clicksPerPage: 0 });
+
+    expect(site.navigatedTo()).toContain('https://shop.test/');
+  });
+
+  /** Without reload-stable identity, returning to a page re-clicks the control that left it. */
+  it('does not click a control twice across the return trip', async () => {
+    const site = twoPageSite();
+
+    await crawlSite({ ...deps(site.driver, { payloadsSince: site.payloadsSince }), maxPages: 5, clicksPerPage: 0 });
+
+    const clicks = site.clicks();
+    expect(new Set(clicks).size).toBe(clicks.length);
+  });
+
+  it('reports a page swept over several visits once, not once per visit', async () => {
+    const site = twoPageSite();
+
+    const outcome = await crawlSite({ ...deps(site.driver, { payloadsSince: site.payloadsSince }), maxPages: 5, clicksPerPage: 0 });
+
+    expect(outcome.pages.map((page) => page.url)).toEqual([
+      'https://shop.test/',
+      'https://shop.test/product',
+    ]);
+  });
+});
+
+describe('withStableKeys', () => {
+  const control = (label: string, group: string) => ({
+    selector: '#x',
+    label,
+    group,
+    risk: 'safe' as const,
+    frameId: 0,
+  });
+
+  it('gives the same control the same key across two enumerations', () => {
+    const first = withStableKeys([control('Add to Cart', 'button.add')]);
+    const second = withStableKeys([control('Add to Cart', 'button.add')]);
+
+    expect(first[0]?.stableKey).toBe(second[0]?.stableKey);
+  });
+
+  /** A grid of identical tiles must not collapse into one key, or the sweep would skip the rest. */
+  it('separates repeats of the same kind by ordinal', () => {
+    const keys = withStableKeys([
+      control('Buy', 'button.tile'),
+      control('Buy', 'button.tile'),
+    ]).map((entry) => entry.stableKey);
+
+    expect(new Set(keys).size).toBe(2);
+  });
+
+  it('separates controls that differ only by frame', () => {
+    const keys = withStableKeys([
+      { ...control('Pay', 'button.pay'), frameId: 0 },
+      { ...control('Pay', 'button.pay'), frameId: 3 },
+    ]).map((entry) => entry.stableKey);
+
+    expect(new Set(keys).size).toBe(2);
+  });
+});
+
+describe('the navbar no longer eats the crawl', () => {
+  /** A header of links above a body of buttons — the shape of essentially every site. */
+  const NAVBAR_PAGE = [
+    { selector: '#n1', label: 'Shop', risk: 'navigates' as const, group: 'a.nav' },
+    { selector: '#n2', label: 'Blog', risk: 'navigates' as const, group: 'a.nav' },
+    { selector: '#n3', label: 'About', risk: 'navigates' as const, group: 'a.nav' },
+    { selector: '#b1', label: 'Add to Cart', risk: 'safe' as const, group: 'button.cta' },
+    { selector: '#b2', label: 'Size guide', risk: 'safe' as const, group: 'button.link' },
+  ];
+
+  function page() {
+    const clicks: string[] = [];
+    const driver: PageDriver = {
+      send: (command) => {
+        switch (command.kind) {
+          case 'location':
+            return Promise.resolve({ kind: 'location', url: 'https://shop.test/', stamp: 'doc' });
+          case 'links':
+            return Promise.resolve({ kind: 'links', urls: [] });
+          case 'clickables':
+            return Promise.resolve({ kind: 'clickables', clickables: NAVBAR_PAGE });
+          case 'click':
+            clicks.push(
+              NAVBAR_PAGE.find((c) => c.selector === command.selector)?.label ?? command.selector,
+            );
+            return Promise.resolve({ kind: 'clicked' });
+          default:
+            return Promise.resolve({ kind: 'dismissed' });
+        }
+      },
+    };
+    return { driver, clicks: () => clicks };
+  }
+
+  it("clicks the page's own buttons before following any link", async () => {
+    const site = page();
+
+    await sweepPage(deps(site.driver, { allowed: () => true }));
+
+    const clicks = site.clicks();
+    const firstLink = clicks.indexOf('Shop');
+    expect(clicks.indexOf('Add to Cart')).toBeLessThan(firstLink);
+    expect(clicks.indexOf('Size guide')).toBeLessThan(firstLink);
+  });
+
+  /**
+   * The navbar is the same component on every page. Once its links have produced nothing new a
+   * couple of times, clicking the rest teaches nothing and costs a navigation each — which is what
+   * made a crawl look like it was circling the header.
+   */
+  it('retires a barren group instead of clicking every member of it', async () => {
+    const site = page();
+
+    await sweepPage(deps(site.driver, { allowed: () => true }));
+
+    expect(site.clicks().filter((label) => ['Shop', 'Blog', 'About'].includes(label)).length)
+      .toBeLessThan(3);
+  });
+
+  it('carries what it learned about a group from one page to the next', async () => {
+    const groups = newGroupMemory();
+    const first = page();
+    await sweepPage(deps(first.driver, { allowed: () => true }), undefined, {
+      clickedHere: new Set(),
+      groups,
+    });
+
+    const second = page();
+    await sweepPage(deps(second.driver, { allowed: () => true }), undefined, {
+      clickedHere: new Set(),
+      groups,
+    });
+
+    // The second page inherits the first's verdict on `a.nav`, so it does not re-walk the header.
+    expect(second.clicks()).not.toContain('About');
   });
 });
