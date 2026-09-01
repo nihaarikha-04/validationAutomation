@@ -203,6 +203,14 @@ export function PageSweep({
    */
   const record = (): void => {
     if (sheet === undefined) {
+      // Silently skipping this cost a tester a ten-minute crawl: the sweep ran, 241 payloads
+      // arrived, and no report appeared or explained itself. Loading a sheet is the only thing
+      // missing, and the payloads are still there to report on once it is.
+      setProblem(
+        'No Event Sheet is loaded, so there is nothing to check the run against. Load one — or ' +
+          'confirm the columns if the mapping form is open — then press "Report on what was ' +
+          'captured". Nothing was lost.',
+      );
       return;
     }
     setReport(buildReport(sheet, latest.current, { site, sheetName, sdkReady, at: now() }));
@@ -324,6 +332,22 @@ export function PageSweep({
 
         <button type="button" disabled={running} onClick={() => void sweep()}>
           {crawl ? 'Crawl the site' : 'Sweep page'}
+        </button>
+
+        {/*
+          The report is built from the payload stream, so it never needed a sweep to have just
+          finished. Offering it separately is what rescues a run whose sheet arrived late, or was
+          being re-mapped while the crawl was going.
+        */}
+        <button
+          type="button"
+          disabled={running || payloads.length === 0}
+          onClick={() => {
+            setProblem(undefined);
+            record();
+          }}
+        >
+          Report on what was captured ({payloads.length})
         </button>
 
         {running ? (

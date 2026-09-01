@@ -333,3 +333,56 @@ describe('PageSweep', () => {
 });
 
 vi.useRealTimers();
+
+describe('PageSweep, reporting without a fresh sweep', () => {
+  it('builds a report from the captured stream on demand', async () => {
+    // A ten-minute crawl produced 241 payloads and no report, because the sheet was being
+    // re-mapped while it ran. The payloads were never the problem.
+    render(
+      <PageSweep
+        driver={driverWith(() => undefined)}
+        sheet={SHEET}
+        payloads={[payload('add_to_cart')]}
+        now={() => NOW}
+        navigation={quietNavigation} site="shop.test" sheetName="sheet.csv" sdkReady onExport={() => undefined}
+        settleMs={0}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Report on what was captured/ }));
+
+    expect(await screen.findByText('PASS')).toBeInTheDocument();
+  });
+
+  it('says why there is no report when no sheet is loaded', async () => {
+    render(
+      <PageSweep
+        driver={driverWith(() => undefined)}
+        sheet={undefined}
+        payloads={[payload('add_to_cart')]}
+        now={() => NOW}
+        navigation={quietNavigation} site="shop.test" sheetName="sheet.csv" sdkReady onExport={() => undefined}
+        settleMs={0}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Report on what was captured/ }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('No Event Sheet is loaded');
+  });
+
+  it('offers nothing to report when the stream is empty', () => {
+    render(
+      <PageSweep
+        driver={driverWith(() => undefined)}
+        sheet={SHEET}
+        payloads={[]}
+        now={() => NOW}
+        navigation={quietNavigation} site="shop.test" sheetName="sheet.csv" sdkReady onExport={() => undefined}
+        settleMs={0}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: /Report on what was captured/ })).toBeDisabled();
+  });
+});

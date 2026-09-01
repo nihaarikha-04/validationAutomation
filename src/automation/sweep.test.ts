@@ -46,7 +46,10 @@ describe('riskOf', () => {
     ['<button>Reorder</button>', 'safe'],
     ['<button>Subscribe to newsletter</button>', 'safe'],
     ['<button>Cancel</button>', 'safe'],
-    ['<button>Delete address</button>', 'safe'],
+    // Was 'safe', to stop the guard skipping the events these produce. It deleted a real saved
+    // address on a live account. Reaching `Address Deleted` now costs an explicit opt-in, which
+    // is the right price.
+    ['<button>Delete address</button>', 'destructive'],
     ['<a href="/about">About us</a>', 'navigates'],
     ['<a href="/x" target="_blank">Docs</a>', 'navigates'],
     ['<a href="#section">Jump</a>', 'safe'],
@@ -189,5 +192,66 @@ describe('findClickables', () => {
     const found = findClickables(pageWith('<button>Pay now</button><button>Search</button>'));
 
     expect(found.map((entry) => entry.risk)).toEqual(['destructive', 'safe']);
+  });
+});
+
+describe('riskOf, controls that destroy a stored record', () => {
+  function link(label: string): Element {
+    const element = document.createElement('button');
+    element.textContent = label;
+    return element;
+  }
+
+  it('treats a bare Delete as destructive', () => {
+    // Regression, ethniq.com: the sweep clicked the Delete beside a saved address on a live
+    // account and deleted it. The list only covered "delete account".
+    expect(riskOf(link('Delete'))).toBe('destructive');
+    expect(riskOf(link('Delete address'))).toBe('destructive');
+  });
+
+  it('treats removing a stored record as destructive', () => {
+    expect(riskOf(link('Remove card'))).toBe('destructive');
+    expect(riskOf(link('Remove this address'))).toBe('destructive');
+  });
+
+  it('still allows a reversible remove', () => {
+    // Removing a cart line is an event the sheet wants tested, and it undoes itself.
+    expect(riskOf(link('Remove from cart'))).toBe('safe');
+    expect(riskOf(link('Remove filter'))).toBe('safe');
+  });
+});
+
+describe('riskOf, removing a cart line', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('treats a bare bin icon inside the cart as safe', () => {
+    // Regression: making a bare "Delete" destructive protected saved addresses but also blocked
+    // `Remove from Cart`, which the sheet asks for and which undoes itself.
+    document.body.innerHTML =
+      '<div class="cart-line"><button aria-label="Delete">🗑</button></div>';
+    const button = document.querySelector('button');
+    if (button === null) throw new Error('no button');
+
+    expect(riskOf(button)).toBe('safe');
+  });
+
+  it('treats removal wording as safe wherever it sits', () => {
+    document.body.innerHTML = '<button>Remove from cart</button><button>Remove item</button>';
+    const [first, second] = [...document.querySelectorAll('button')];
+    if (first === undefined || second === undefined) throw new Error('missing');
+
+    expect(riskOf(first)).toBe('safe');
+    expect(riskOf(second)).toBe('safe');
+  });
+
+  it('still protects a saved address outside the cart', () => {
+    document.body.innerHTML =
+      '<div class="address-book"><button aria-label="Delete">🗑</button></div>';
+    const button = document.querySelector('button');
+    if (button === null) throw new Error('no button');
+
+    expect(riskOf(button)).toBe('destructive');
   });
 });

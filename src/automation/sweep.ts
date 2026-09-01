@@ -72,8 +72,28 @@ const DESTRUCTIVE = new RegExp(
     // Destroys an account or a paid commitment.
     'delete (my )?account', 'close account', 'deactivate', 'unsubscribe',
     'cancel (my )?(subscription|plan|order|membership)',
+    // Destroys a stored record. A bare "Delete" next to a saved address is the whole label a
+    // site gives that button, and treating it as safe deleted a real address on a live account.
+    '\\bdelete\\b', '\\bdestroy\\b',
+    // `remove` alone is usually reversible — a cart line, a filter — and those are worth testing.
+    // Paired with a stored record it is not.
+    'remove (this |the |saved )?(address|card|payment|account|profile|review|photo|image)',
   ].join('|'),
 );
+
+/** Wording that names something a site restores by adding it again. */
+const REVERSIBLE = new RegExp(
+  [
+    '(remove|delete)( this| the)?( item| product| line| entry)?( from)? (cart|bag|basket)',
+    'remove (item|product|line|filter|coupon|promo)',
+    'clear (filter|filters|search)',
+  ].join('|'),
+);
+
+/** Whether this control lives inside the cart, where removing a line is routine rather than lost data. */
+function inCart(element: Element): boolean {
+  return element.closest('[class*="cart" i], [id*="cart" i], [data-testid*="cart" i]') !== null;
+}
 
 /**
  * Every control on the page worth clicking, in document order, each labelled with its risk.
@@ -252,6 +272,13 @@ export function riskOf(element: Element): ClickRisk {
   const words = `${labelOf(element)} ${element.getAttribute('aria-label') ?? ''} ${href}`
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ');
+
+  // Emptying a cart line undoes itself, and `Remove from Cart` is an event the sheet asks for.
+  // The button is often a bare bin icon labelled "Delete", which reads as destructive on its own
+  // wording — so where it sits decides it. Checked before the destructive list, never after.
+  if (REVERSIBLE.test(words) || inCart(element)) {
+    return 'safe';
+  }
 
   if (DESTRUCTIVE.test(words)) {
     return 'destructive';
