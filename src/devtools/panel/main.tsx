@@ -1,9 +1,11 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
+import { createChromeNavigationSource } from './chrome-navigation';
 import { createChromePageDriver } from './chrome-page-driver';
 import { createChromePageEvaluator } from './chrome-page-evaluator';
 import { createChromePayloadSource } from './chrome-payload-source';
+import { downloadText } from './browser-download';
 import './panel.css';
 
 // Composition root for the panel surface. chrome.* and timers are constructed here and
@@ -25,7 +27,9 @@ createRoot(container).render(
       wait={wait}
       payloadSource={createChromePayloadSource()}
       driver={createChromePageDriver()}
+      navigation={createChromeNavigationSource()}
       now={() => Date.now()}
+      download={downloadText}
     />
   </StrictMode>,
 );

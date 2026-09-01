@@ -1,5 +1,6 @@
+import { keywordsFromEventName } from './detect-action';
 import type { EventSheet } from '../event-sheet/types';
-import { isDestructive, type ActionIntent } from './types';
+import { isDestructive, type ActionIntent, type ActionTarget } from './types';
 
 /**
  * Maps an Event Sheet name to the action that produces it.
@@ -29,7 +30,9 @@ const NATURAL_ORDER: readonly ActionIntent[] = [
 
 export interface PlannedTest {
   readonly eventName: string;
-  /** `undefined` when nothing in the page can be clicked to produce this event. */
+  /** What to look for on the page. `undefined` when the name yields nothing to search for. */
+  readonly target: ActionTarget | undefined;
+  /** Set only for the curated ecommerce actions, and used for ordering. */
   readonly intent: ActionIntent | undefined;
   /** Present when this event will not run unattended, and why. */
   readonly skipReason: string | undefined;
@@ -63,22 +66,34 @@ export function planFromSheet(
   const planned: PlannedTest[] = [...sheet.events.keys()].map((eventName) => {
     const intent = intentForEvent(eventName);
 
-    if (intent === undefined) {
+    // Events outside the ecommerce set are still drivable: search the page for the event's own
+    // words. Only a name with nothing searchable left in it is genuinely unusable.
+    const keywords = intent === undefined ? keywordsFromEventName(eventName) : [];
+    const target: ActionTarget | undefined =
+      intent !== undefined
+        ? { kind: 'intent', intent }
+        : keywords.length > 0
+          ? { kind: 'keywords', keywords, label: eventName }
+          : undefined;
+
+    if (target === undefined) {
       return {
         eventName,
+        target: undefined,
         intent: undefined,
-        skipReason: 'No page action maps to this event name — trigger it yourself.',
+        skipReason: 'Nothing on a page can be clicked to produce this — trigger it yourself.',
       };
     }
-    if (isDestructive(intent) && !options.includeDestructive) {
+    if (isDestructive(target, eventName) && !options.includeDestructive) {
       return {
         eventName,
+        target,
         intent,
-        skipReason: 'Spends money — run this one on its own.',
+        skipReason: 'Spends money or cannot be undone — run this one on its own.',
       };
     }
 
-    return { eventName, intent, skipReason: undefined };
+    return { eventName, target, intent, skipReason: undefined };
   });
 
   return [...planned].sort(byNaturalOrder);
@@ -86,6 +101,7 @@ export function planFromSheet(
 
 /** Runnable tests first, in shopper order; everything skipped sinks to the bottom. */
 function byNaturalOrder(a: PlannedTest, b: PlannedTest): number {
+  // Curated ecommerce actions run in shopper order; keyword-driven ones follow, in sheet order.
   const rank = (test: PlannedTest): number =>
     test.intent === undefined ? NATURAL_ORDER.length : NATURAL_ORDER.indexOf(test.intent);
 
@@ -94,5 +110,5 @@ function byNaturalOrder(a: PlannedTest, b: PlannedTest): number {
 }
 
 export function runnable(plan: readonly PlannedTest[]): readonly PlannedTest[] {
-  return plan.filter((test) => test.skipReason === undefined && test.intent !== undefined);
+  return plan.filter((test) => test.skipReason === undefined && test.target !== undefined);
 }

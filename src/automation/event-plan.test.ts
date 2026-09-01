@@ -54,18 +54,36 @@ describe('planFromSheet', () => {
     expect(plan[0]?.skipReason).toBeUndefined();
   });
 
-  it('lists an unmappable event rather than dropping it', () => {
-    const plan = planFromSheet(sheetWith('add_to_cart', 'newsletter_signup'));
+  it('drives a non-ecommerce event from its own name', () => {
+    const plan = planFromSheet(sheetWith('newsletter_signup'));
+
+    expect(plan[0]?.skipReason).toBeUndefined();
+    expect(plan[0]?.target).toEqual({
+      kind: 'keywords',
+      keywords: ['newsletter', 'sign', 'up'],
+      label: 'newsletter_signup',
+    });
+  });
+
+  it('lists an event nothing can click rather than dropping it', () => {
+    // "page viewed" is all reporting words — there is no button called that.
+    const plan = planFromSheet(sheetWith('add_to_cart', 'page_viewed'));
 
     // A silently shorter list would read as "all tested" when one was never attempted.
     expect(plan).toHaveLength(2);
-    expect(plan.find((test) => test.eventName === 'newsletter_signup')?.skipReason).toContain(
-      'No page action maps',
+    expect(plan.find((test) => test.eventName === 'page_viewed')?.skipReason).toContain(
+      'Nothing on a page can be clicked',
     );
   });
 
+  it('gates a destructive event even outside the ecommerce set', () => {
+    const plan = planFromSheet(sheetWith('subscription_payment'));
+
+    expect(plan[0]?.skipReason).toContain('Spends money');
+  });
+
   it('sinks skipped tests below runnable ones', () => {
-    const plan = planFromSheet(sheetWith('newsletter_signup', 'add_to_cart'));
+    const plan = planFromSheet(sheetWith('page_viewed', 'add_to_cart'));
 
     expect(plan[0]?.eventName).toBe('add_to_cart');
   });

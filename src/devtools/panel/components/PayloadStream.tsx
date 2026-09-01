@@ -1,4 +1,9 @@
-import { isSpecial, type CapturedPayload, type TransferableValue } from '../../../shared/payload';
+import {
+  isSpecial,
+  type CaptureStats,
+  type CapturedPayload,
+  type TransferableValue,
+} from '../../../shared/payload';
 import type { CaptureVerdict } from '../../../validation/from-capture';
 import { VerdictDetail } from './VerdictDetail';
 
@@ -6,10 +11,12 @@ export interface PayloadStreamProps {
   readonly payloads: readonly CapturedPayload[];
   /** Keyed by payload id. Empty until an Event Sheet is loaded. */
   readonly verdicts: ReadonlyMap<string, CaptureVerdict>;
+  /** Capture's own account of what it is seeing. Undefined until the first report arrives. */
+  readonly stats: CaptureStats | undefined;
   readonly onClear: () => void;
 }
 
-export function PayloadStream({ payloads, verdicts, onClear }: PayloadStreamProps) {
+export function PayloadStream({ payloads, verdicts, stats, onClear }: PayloadStreamProps) {
   return (
     <section className="stream">
       <div className="stream__head">
@@ -21,9 +28,29 @@ export function PayloadStream({ payloads, verdicts, onClear }: PayloadStreamProp
         </button>
       </div>
 
+      {stats === undefined ? null : (
+        <p className="stream__stats">
+          Watched {stats.seen} console {stats.seen === 1 ? 'line' : 'lines'} on this page;{' '}
+          {stats.matched} looked like Smartech.
+          {stats.matched === 0 && stats.recent.length > 0 ? (
+            <>
+              {' '}
+              Nothing matched, so either this page has no Smartech debug output or its format is one
+              we do not recognise. Most recent lines:{' '}
+              {stats.recent.map((line, index) => (
+                <span key={line}>
+                  {index > 0 ? ' · ' : ''}
+                  <code>{line}</code>
+                </span>
+              ))}
+            </>
+          ) : null}
+        </p>
+      )}
+
       {payloads.length === 0 ? (
         <p className="stream__empty">
-          Waiting for <code>smartech()</code> calls on the inspected page.
+          Waiting for Smartech debug output on the inspected page.
         </p>
       ) : (
         <ul className="stream__list">

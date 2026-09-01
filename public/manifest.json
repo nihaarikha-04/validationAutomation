@@ -10,12 +10,14 @@
       "matches": ["<all_urls>"],
       "js": ["content/debug-capture.js"],
       "run_at": "document_start",
+      "all_frames": true,
       "world": "MAIN"
     },
     {
       "matches": ["<all_urls>"],
       "js": ["content/bridge.js"],
       "run_at": "document_start",
+      "all_frames": true,
       "world": "ISOLATED"
     }
   ]

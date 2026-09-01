@@ -53,7 +53,31 @@ export function isConfident(candidate: ActionCandidate): boolean {
   return candidate.confidence >= AUTO_EXECUTE_THRESHOLD;
 }
 
-/** Actions that spend money. Never triggered without an explicit, separate confirmation. */
-export function isDestructive(intent: ActionIntent): boolean {
-  return intent === 'checkout';
+/**
+ * What a run is trying to click.
+ *
+ * `intent` covers the ecommerce actions we curated synonyms for. `keywords` covers everything
+ * else: the words are derived from the event's own name, so a sheet listing `newsletter_signup`
+ * can still be driven without anyone hand-mapping it first.
+ */
+export type ActionTarget =
+  | { readonly kind: 'intent'; readonly intent: ActionIntent }
+  | { readonly kind: 'keywords'; readonly keywords: readonly string[]; readonly label: string };
+
+/**
+ * Words that mean an action costs money or destroys something.
+ *
+ * Checked against the event name as well as the intent, because safety must not depend on our
+ * fixed list of ecommerce actions — an event called `payment_completed` has to be gated whether
+ * or not we recognised it as checkout.
+ */
+const IRREVERSIBLE = /\b(pay|payment|purchase|order|checkout|buy|donate|subscribe|delete|cancel)\b/;
+
+/** Actions that spend money or cannot be undone. Never triggered without explicit confirmation. */
+export function isDestructive(target: ActionTarget, eventName = ''): boolean {
+  if (target.kind === 'intent' && target.intent === 'checkout') {
+    return true;
+  }
+  const words = eventName.toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+  return IRREVERSIBLE.test(words);
 }

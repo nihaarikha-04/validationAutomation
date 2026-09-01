@@ -6,7 +6,14 @@ import { type ActionCandidate } from './types';
 const NOW = 1_000_000;
 
 function context(overrides: Partial<RunContext> = {}): RunContext {
-  return { intent: 'add-to-cart', now: NOW, timeouts: DEFAULT_TIMEOUTS, ...overrides };
+  return {
+    target: { kind: 'intent', intent: 'add-to-cart' },
+    destructive: false,
+    clickWhenUnsure: false,
+    now: NOW,
+    timeouts: DEFAULT_TIMEOUTS,
+    ...overrides,
+  };
 }
 
 function candidate(confidence: number): ActionCandidate {
@@ -33,7 +40,7 @@ const WEAK = candidate(0.6);
 
 describe('advance', () => {
   it('starts by checking the SDK', () => {
-    const next = advance({ kind: 'idle' }, { kind: 'start', intent: 'add-to-cart' }, context());
+    const next = advance({ kind: 'idle' }, { kind: 'start' }, context());
 
     expect(next.kind).toBe('checking-sdk');
   });
@@ -82,7 +89,7 @@ describe('advance', () => {
     const next = advance(
       { kind: 'detecting', deadline: NOW + 1 },
       { kind: 'candidates', candidates: [CONFIDENT] },
-      context({ intent: 'checkout' }),
+      context({ destructive: true }),
     );
 
     expect(next.kind).toBe('awaiting-confirmation');
@@ -94,7 +101,7 @@ describe('advance', () => {
     const next = advance(
       { kind: 'awaiting-manual-pick' },
       { kind: 'manual-pick', candidate: CONFIDENT },
-      context({ intent: 'checkout' }),
+      context({ destructive: true }),
     );
 
     expect(next.kind).toBe('awaiting-confirmation');

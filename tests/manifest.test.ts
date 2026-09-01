@@ -41,10 +41,13 @@ describe('manifest.json', () => {
     expect(worlds).toEqual(['MAIN', 'ISOLATED']);
 
     for (const entry of entries) {
-      // The interceptor must beat the Smartech snippet; the bridge must be listening
-      // before the interceptor posts anything.
+      // The capture script must beat the Smartech snippet; the bridge must be listening
+      // before it posts anything.
       expect(entry['run_at']).toBe('document_start');
       expect(entry['matches']).toEqual(['<all_urls>']);
+      // Controls live inside iframes — payment widgets especially — and a top-frame-only
+      // injection cannot see or click any of them.
+      expect(entry['all_frames']).toBe(true);
     }
   });
 

@@ -12,11 +12,13 @@ import {
   runnable,
   type PlannedTest,
 } from '../../../automation/event-plan';
-import type { ActionIntent } from '../../../automation/types';
+import { isDestructive, type ActionIntent, type ActionTarget } from '../../../automation/types';
 import type { EventSheet } from '../../../event-sheet/types';
 import type { CapturedPayload } from '../../../shared/payload';
 import { matchEvent } from '../../../validation/match-event';
+import type { ValidationResult } from '../../../validation/types';
 import { validateEvent } from '../../../validation/validate';
+import { VerdictDetail } from './VerdictDetail';
 
 const INTENTS: readonly ActionIntent[] = [
   'add-to-cart',
@@ -30,13 +32,22 @@ const TICK_MS = 250;
 
 export interface BatchResult {
   readonly eventName: string;
-  readonly outcome: 'PASS' | 'FAIL' | 'SKIPPED';
+  readonly outcome: 'PASS' | 'FAIL' | 'SKIPPED' | 'NEEDS REVIEW';
   readonly detail: string | undefined;
+  /** The debug log this run actually captured, when one arrived. */
+  readonly payload: CapturedPayload | undefined;
+  /** The per-field verdict, when the run got far enough to produce one. */
+  readonly result: ValidationResult | undefined;
+  /**
+   * Events that fired while this run was waiting but were not the one it expected. The most
+   * useful thing to know when a run reports no matching event.
+   */
+  readonly alsoFired: readonly string[];
 }
 
 /** What the current run is for. Set from the dropdowns, or from the queue during a batch. */
 interface ActiveTest {
-  readonly intent: ActionIntent;
+  readonly target: ActionTarget;
   readonly eventName: string;
 }
 
@@ -71,24 +82,34 @@ export function TestRunner({
   const [active, setActive] = useState<ActiveTest | undefined>(undefined);
   const [queue, setQueue] = useState<readonly PlannedTest[]>([]);
   const [results, setResults] = useState<readonly BatchResult[]>([]);
+  const [clickWhenUnsure, setClickWhenUnsure] = useState(false);
+  const [lastCapture, setLastCapture] = useState<CapturedPayload | undefined>(undefined);
   const batching = useRef(false);
   const testId = useRef(0);
+  /** The run already written into `results`, so a re-render cannot record it twice. */
+  const recorded = useRef(0);
+  /** When the click landed, kept past the state that carried it so failures can report context. */
+  const waitedFrom = useRef<number | undefined>(undefined);
 
-  const runIntent = active?.intent ?? intent;
+  const runTarget: ActionTarget = active?.target ?? { kind: 'intent', intent };
   const runEvent = active?.eventName ?? expectedEvent;
 
-  const context = (): RunContext => ({ intent: runIntent, now: now(), timeouts: DEFAULT_TIMEOUTS });
+  const contextFor = (test: ActiveTest): RunContext => ({
+    target: test.target,
+    destructive: isDestructive(test.target, test.eventName),
+    clickWhenUnsure,
+    now: now(),
+    timeouts: DEFAULT_TIMEOUTS,
+  });
+
+  const context = (): RunContext =>
+    contextFor(active ?? { target: runTarget, eventName: runEvent });
 
   const begin = (test: ActiveTest): void => {
     testId.current += 1;
+    setLastCapture(undefined);
     setActive(test);
-    setState(
-      advance(
-        { kind: 'idle' },
-        { kind: 'start', intent: test.intent },
-        { intent: test.intent, now: now(), timeouts: DEFAULT_TIMEOUTS },
-      ),
-    );
+    setState(advance({ kind: 'idle' }, { kind: 'start' }, contextFor(test)));
   };
   const dispatch = (event: Parameters<typeof advance>[1]): void => {
     setState((current) => advance(current, event, context()));
@@ -117,7 +138,7 @@ export function TestRunner({
     if (state.kind !== 'detecting') {
       return;
     }
-    void driver.send({ kind: 'detect', intent }).then((reply) => {
+    void driver.send({ kind: 'detect', target: runTarget }).then((reply) => {
       if (reply.kind === 'candidates') {
         setPlatform(reply.platform);
         dispatch({ kind: 'candidates', candidates: reply.candidates });
@@ -145,6 +166,12 @@ export function TestRunner({
   }, [state.kind]);
 
   // Association runs on every new payload while waiting: the event may arrive at any moment.
+  useEffect(() => {
+    if (state.kind === 'waiting-for-event') {
+      waitedFrom.current = state.startedAt;
+    }
+  }, [state.kind]);
+
   useEffect(() => {
     if (state.kind !== 'waiting-for-event' || sheet === undefined) {
       return;
@@ -174,6 +201,7 @@ export function TestRunner({
       return;
     }
 
+    setLastCapture(association.payload);
     dispatch({ kind: 'payload-captured' });
     dispatch({
       kind: 'validated',
@@ -181,32 +209,58 @@ export function TestRunner({
     });
   }, [state.kind, payloads, sheet, runEvent]);
 
-  // Batch progression: record the finished run, then start the next queued one.
+  /**
+   * Records a finished run and, during a batch, starts the next one.
+   *
+   * A run that stops for a human is only auto-recorded while batching — on its own, the dialog is
+   * the point. Blocking a batch on one dialog left the rest of the sheet untested, which is what
+   * happened on the first real sheet we tried.
+   */
   useEffect(() => {
-    if ((state.kind !== 'passed' && state.kind !== 'failed') || !batching.current) {
+    const finished = terminalOutcome(state, batching.current);
+    if (finished === undefined || active === undefined || recorded.current === testId.current) {
+      return;
+    }
+    recorded.current = testId.current;
+
+    const since = waitedFrom.current;
+    const alsoFired =
+      lastCapture !== undefined || since === undefined
+        ? []
+        : [
+            ...new Set(
+              payloads
+                .filter((payload) => payload.at >= since && payload.eventName !== undefined)
+                .map((payload) => payload.eventName ?? ''),
+            ),
+          ];
+
+    setResults((current) => [
+      ...current,
+      {
+        eventName: active.eventName,
+        outcome: finished.outcome,
+        detail: finished.detail,
+        payload: lastCapture,
+        result: state.kind === 'passed' || state.kind === 'failed' ? state.result : undefined,
+        alsoFired,
+      },
+    ]);
+
+    if (!batching.current) {
       return;
     }
 
-    if (active !== undefined) {
-      setResults((current) => [
-        ...current,
-        {
-          eventName: active.eventName,
-          outcome: state.kind === 'passed' ? 'PASS' : 'FAIL',
-          detail: state.kind === 'failed' ? state.reason : undefined,
-        },
-      ]);
-    }
-
     const [next, ...rest] = queue;
-    if (next?.intent === undefined) {
+    if (next?.target === undefined) {
       batching.current = false;
       setActive(undefined);
+      setState({ kind: 'idle' });
       return;
     }
 
     setQueue(rest);
-    begin({ intent: next.intent, eventName: next.eventName });
+    begin({ target: next.target, eventName: next.eventName });
   }, [state.kind]);
 
   const events = sheet === undefined ? [] : [...sheet.events.keys()];
@@ -260,11 +314,21 @@ export function TestRunner({
               setState({ kind: 'sheet-required' });
               return;
             }
-            begin({ intent, eventName: expectedEvent });
+            begin({ target: { kind: 'intent', intent }, eventName: expectedEvent });
           }}
         >
           Run
         </button>
+
+        <label className="runner__toggle">
+          <input
+            type="checkbox"
+            checked={clickWhenUnsure}
+            disabled={running}
+            onChange={(event) => setClickWhenUnsure(event.target.checked)}
+          />
+          <span>Click best match even when unsure</span>
+        </label>
 
         <button
           type="button"
@@ -283,11 +347,14 @@ export function TestRunner({
                   eventName: test.eventName,
                   outcome: 'SKIPPED' as const,
                   detail: test.skipReason,
+                  payload: undefined,
+                  result: undefined,
+                  alsoFired: [],
                 })),
             );
 
             const [first, ...rest] = runnable(plan);
-            if (first?.intent === undefined) {
+            if (first?.target === undefined) {
               batching.current = false;
               setActive(undefined);
               return;
@@ -295,7 +362,7 @@ export function TestRunner({
 
             batching.current = true;
             setQueue(rest);
-            begin({ intent: first.intent, eventName: first.eventName });
+            begin({ target: first.target, eventName: first.eventName });
           }}
         >
           Run all from sheet
@@ -355,29 +422,92 @@ export function TestRunner({
       ) : null}
 
       {results.length === 0 ? null : (
-        <table className="runner__results">
-          <thead>
-            <tr>
-              <th scope="col">Event</th>
-              <th scope="col">Outcome</th>
-              <th scope="col">Detail</th>
-            </tr>
-          </thead>
-          <tbody>
-            {results.map((entry) => (
-              <tr key={entry.eventName} className={`runner__result--${entry.outcome.toLowerCase()}`}>
-                <td>
+        <ul className="runner__results">
+          {results.map((entry) => (
+            <li key={entry.eventName}>
+              <details>
+                <summary>
                   <code>{entry.eventName}</code>
-                </td>
-                <td>{entry.outcome}</td>
-                <td>{entry.detail ?? ''}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                  <span className={`runner__outcome runner__outcome--${entry.outcome.toLowerCase().replace(' ', '-')}`}>
+                    {entry.outcome}
+                  </span>
+                  {entry.detail === undefined ? null : (
+                    <span className="runner__detail">{entry.detail}</span>
+                  )}
+                </summary>
+
+                {entry.result === undefined ? null : (
+                  <VerdictDetail verdict={{ kind: 'validated', result: entry.result, firedAs: undefined, matchReason: undefined }} />
+                )}
+
+                {entry.payload === undefined ? (
+                  <p className="runner__note">
+                    No debug log was captured for this run.
+                    {entry.alsoFired.length > 0 ? (
+                      <>
+                        {' '}
+                        The page did fire{' '}
+                        {entry.alsoFired.map((name, index) => (
+                          <span key={name}>
+                            {index > 0 ? ', ' : ''}
+                            <code>{name}</code>
+                          </span>
+                        ))}
+                        . If one of those is this event under another name, add it to the Event
+                        Sheet or alias it.
+                      </>
+                    ) : null}
+                  </p>
+                ) : (
+                  <pre className="stream__raw">{prettify(entry.payload.raw)}</pre>
+                )}
+              </details>
+            </li>
+          ))}
+        </ul>
       )}
     </section>
   );
+}
+
+/** `undefined` while a run is still in progress; otherwise how it should be recorded. */
+function terminalOutcome(
+  state: RunState,
+  batching: boolean,
+): { outcome: BatchResult['outcome']; detail: string | undefined } | undefined {
+  if (!batching && (state.kind === 'awaiting-confirmation' || state.kind === 'awaiting-manual-pick')) {
+    // On its own, waiting for the user is the intended behaviour, not an outcome.
+    return undefined;
+  }
+
+  switch (state.kind) {
+    case 'passed':
+      return { outcome: 'PASS', detail: undefined };
+    case 'failed':
+      return { outcome: 'FAIL', detail: state.reason };
+    case 'awaiting-confirmation':
+      return {
+        outcome: 'NEEDS REVIEW',
+        detail: `Detection was only ${Math.round(state.candidate.confidence * 100)}% sure of "${state.candidate.label}", so nothing was clicked and no event fired. Run it on its own to confirm the click, or tick "Click best match even when unsure".`,
+      };
+    case 'awaiting-manual-pick':
+      return {
+        outcome: 'NEEDS REVIEW',
+        detail:
+          'No element on this page looks like this event — run it on its own and point at the element yourself.',
+      };
+    default:
+      return undefined;
+  }
+}
+
+/** The stored raw text is authoritative; this only re-indents it for reading. */
+function prettify(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
 }
 
 function describe(state: RunState): string {

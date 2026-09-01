@@ -1,13 +1,16 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import type { AutomationReply, PageDriver } from '../../automation/commands';
-import type { CapturedPayload, PayloadSource } from '../../shared/payload';
+import type { CaptureStats, CapturedPayload, PayloadSource } from '../../shared/payload';
 import {
   HOSTNAME_EXPRESSION,
   type EvaluationOutcome,
   type PageEvaluator,
 } from '../../shared/sdk';
+import type { NavigationSource } from './chrome-navigation';
 import { App } from './App';
+
+const quietNavigation: NavigationSource = { subscribe: () => () => undefined };
 
 const noWait = (): Promise<void> => Promise.resolve();
 const FIXED_NOW = 1_735_689_600_000;
@@ -36,6 +39,9 @@ function fakePayloadSource(): ControllablePayloadSource {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    subscribeStats(_listener: (stats: CaptureStats) => void) {
+      return () => undefined;
+    },
     emit(payload) {
       for (const listener of listeners) {
         listener(payload);
@@ -57,7 +63,9 @@ function renderApp(source: PayloadSource = fakePayloadSource()) {
       wait={noWait}
       payloadSource={source}
       driver={idleDriver}
+      navigation={quietNavigation}
       now={() => FIXED_NOW}
+      download={() => undefined}
     />,
   );
 }
@@ -103,7 +111,9 @@ describe('App', () => {
         wait={noWait}
         payloadSource={fakePayloadSource()}
         driver={idleDriver}
+        navigation={quietNavigation}
         now={() => FIXED_NOW}
+      download={() => undefined}
       />,
     );
 
@@ -160,7 +170,8 @@ describe('App', () => {
   it('adds pasted debug objects to the same stream', () => {
     renderApp();
 
-    fireEvent.change(screen.getByRole('textbox'), {
+    // The sweep's field-values editor is a textbox too, so this must be specific.
+    fireEvent.change(screen.getByPlaceholderText(/add_to_cart/), {
       target: { value: "{event: 'add_to_cart'} {event: 'purchase'}" },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add payloads' }));
@@ -243,7 +254,9 @@ describe('App', () => {
   it('reports a parse failure without adding anything', () => {
     renderApp();
 
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: '{event: }' } });
+    fireEvent.change(screen.getByPlaceholderText(/add_to_cart/), {
+      target: { value: '{event: }' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Add payloads' }));
 
     expect(screen.getByRole('alert')).toHaveTextContent('Unexpected character');

@@ -10,7 +10,12 @@ import type {
   EventSheet,
   SheetGrid,
 } from '../../event-sheet/types';
-import type { CapturedPayload, PayloadSource, TransferableValue } from '../../shared/payload';
+import type {
+  CaptureStats,
+  CapturedPayload,
+  PayloadSource,
+  TransferableValue,
+} from '../../shared/payload';
 import {
   detectAndEnableDebug,
   HOSTNAME_EXPRESSION,
@@ -19,9 +24,11 @@ import {
   type Wait,
 } from '../../shared/sdk';
 import type { PageDriver } from '../../automation/commands';
+import type { NavigationSource } from './chrome-navigation';
 import { verdictFor, type CaptureVerdict } from '../../validation/from-capture';
 import { ColumnMappingForm } from './components/ColumnMappingForm';
 import { EventTree } from './components/EventTree';
+import { PageSweep } from './components/PageSweep';
 import { PastePayloads } from './components/PastePayloads';
 import { TestRunner } from './components/TestRunner';
 import { PayloadStream } from './components/PayloadStream';
@@ -49,14 +56,26 @@ export interface AppProps {
   readonly wait: Wait;
   readonly payloadSource: PayloadSource;
   readonly driver: PageDriver;
+  readonly navigation: NavigationSource;
   readonly now: () => number;
+  /** Saves a generated report. Injected because touching the DOM is the root's job, not a component's. */
+  readonly download: (contents: string, fileName: string) => void;
 }
 
-export function App({ evaluator, wait, payloadSource, driver, now }: AppProps) {
+export function App({
+  evaluator,
+  wait,
+  payloadSource,
+  driver,
+  navigation,
+  now,
+  download,
+}: AppProps) {
   const [hostname, setHostname] = useState('');
   const [sdk, setSdk] = useState<SdkStatus | undefined>(undefined);
   const [sheetState, setSheetState] = useState<SheetState>({ kind: 'empty' });
   const [payloads, setPayloads] = useState<readonly CapturedPayload[]>([]);
+  const [stats, setStats] = useState<CaptureStats | undefined>(undefined);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,6 +98,8 @@ export function App({ evaluator, wait, payloadSource, driver, now }: AppProps) {
       cancelled = true;
     };
   }, [evaluator, wait]);
+
+  useEffect(() => payloadSource.subscribeStats(setStats), [payloadSource]);
 
   useEffect(
     () =>
@@ -171,6 +192,18 @@ export function App({ evaluator, wait, payloadSource, driver, now }: AppProps) {
 
       {sheetState.kind === 'ready' ? <EventTree sheet={sheetState.sheet} /> : null}
 
+      <PageSweep
+        driver={driver}
+        sheet={sheetState.kind === 'ready' ? sheetState.sheet : undefined}
+        payloads={payloads}
+        now={now}
+        navigation={navigation}
+        site={hostname}
+        sheetName={sheetState.kind === 'ready' ? sheetState.fileName : ''}
+        sdkReady={sdk?.kind === 'ready'}
+        onExport={download}
+      />
+
       <TestRunner
         driver={driver}
         sheet={sheetState.kind === 'ready' ? sheetState.sheet : undefined}
@@ -183,6 +216,7 @@ export function App({ evaluator, wait, payloadSource, driver, now }: AppProps) {
       <PayloadStream
         payloads={payloads}
         verdicts={verdicts}
+        stats={stats}
         onClear={() => {
           setPayloads([]);
         }}

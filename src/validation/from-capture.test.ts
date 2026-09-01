@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { EventSchema, EventSheet, FieldSchema } from '../event-sheet/types';
-import type { CapturedPayload } from '../shared/payload';
-import { payloadSubject, verdictFor } from './from-capture';
+import type { CapturedPayload, TransferableValue } from '../shared/payload';
+import { payloadSubject, unwrapEnvelope, verdictFor } from './from-capture';
 
 const AT = 1_735_689_600_000;
 const LINE = "[Smartech Debugger] Firing EVT: 'add_to_cart' with payload: ";
@@ -97,5 +97,61 @@ describe('verdictFor', () => {
     const verdict = verdictFor(captured({ eventName: 'Add to Cart' }), SHEET, aliases);
 
     expect(verdict.kind).toBe('validated');
+  });
+});
+
+describe('Smartech envelopes', () => {
+  /**
+   * The shape a live Smartech debug line actually has: a session record naming the event, with
+   * the event's own fields nested under `payload`.
+   */
+  function enveloped(eventName: string, payload: Record<string, unknown>): CapturedPayload {
+    const envelope = {
+      user_key: 'ADGMOT35',
+      customer_key: '919384660680',
+      siteid: '80a6d96f',
+      sid: 1_788_271_712_383,
+      url: 'https://shop.example.com/profile',
+      eventname: eventName,
+      payload,
+    } as unknown as TransferableValue;
+
+    return {
+      id: eventName,
+      at: AT,
+      eventName,
+      args: ['[Smartech Debugger] Firing EVT', envelope],
+      raw: '[]',
+      origin: 'intercepted',
+    };
+  }
+
+  it('validates the fields inside the envelope, not the session record around them', () => {
+    const subject = payloadSubject(enveloped('cart viewed', { item_count: 3, value: 1390 }));
+
+    expect(subject).toEqual({ item_count: 3, value: 1390 });
+  });
+
+  it('leaves a plain payload alone', () => {
+    expect(unwrapEnvelope({ product_id: 'SKU1', price: 499 })).toEqual({
+      product_id: 'SKU1',
+      price: 499,
+    });
+  });
+
+  /** Without the event-name guard, any payload with a `data` key would be silently truncated. */
+  it('does not treat a payload that merely has a data key as an envelope', () => {
+    const payload = { order_id: 'A1', data: { note: 'gift' } };
+
+    expect(unwrapEnvelope(payload)).toEqual(payload);
+  });
+
+  it('reads the fields Netcore\'s activity API nests under activity_params', () => {
+    const subject = unwrapEnvelope({
+      activity_name: 'Registration',
+      activity_params: { mobile_number: '919384660680' },
+    });
+
+    expect(subject).toEqual({ mobile_number: '919384660680' });
   });
 });

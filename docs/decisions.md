@@ -364,3 +364,88 @@ error was already routed through `setTimeout`, so the page kept working — but 
 lines" was not as narrow as it sounded, because deciding whether a line is ours already required running
 our code on every log statement everywhere. Worth weighing at Phase 6's security pass, alongside the
 `optional_host_permissions` alternative.
+
+
+---
+
+## D13 — Smartech's debug prefix varies by integration
+
+**The bug under everything else.** Capture matched `/^\s*\[\s*smartech\b/i` — a line *starting with
+a bracket*. The mock site and one client site print `[Smartech Debugger] Firing EVT: 'x' with payload:`,
+so it worked there. A real client site prints:
+
+```js
+console.info('Smartech debug', { …payload… })
+```
+
+No brackets. Every line was rejected, silently, and the panel faithfully reported nothing captured —
+which read as the automation failing, and sent four rounds of fixes at the wrong layer.
+
+**Fixed two ways:**
+
+- The bracket is optional: `/^\s*\[?\s*smartech\b/i`.
+- The event name is no longer assumed to be in the message. It is read from the message when present,
+  otherwise from a name-ish key on the logged payload (`eventName`, `event_name`, `evtName`, `event`,
+  `name`), including one nested level. Keys are compared with case and punctuation stripped, so one
+  entry covers every spelling.
+
+**The lesson worth keeping:** a matcher that silently rejects everything is indistinguishable from a
+feature that does not work. Both look like an empty list. Capture should have said "7 console lines
+seen, 0 matched the Smartech prefix" from the start — the diagnostic that finally found this took two
+minutes and could have existed on day one.
+
+
+---
+
+## D14 — Wrapping console makes us the apparent source of every library's warnings
+
+Three times now a library's own console warning has been reported as ours — Appcues, Freshdesk, Meta
+Pixel — because Chrome prints a stack trace for console output and our wrapper is the innermost frame.
+
+**This is unavoidable while we read console output.** Any wrapper adds a frame; there is no way to
+observe a call and not be on its stack. The messages are not errors we cause, and the pages keep
+working — but a developer clicking the source link lands in our extension instead of their code, which
+is a real cost of the capture approach and worth stating rather than explaining away each time.
+
+**What was worth fixing:** the wrapper now reports the original function's source from
+`console.log.toString()` and keeps the original `name`. Analytics libraries do check whether console
+has been tampered with, and some go quiet when they believe they are being watched — which would
+defeat the entire point of observing them behave normally.
+
+This covers `console.log.toString()`. It deliberately does **not** cover
+`Function.prototype.toString.call(console.log)`, which ignores an own property: defeating that means
+patching `Function.prototype` for the whole page, which is far more invasive than the problem warrants.
+
+**The real mitigation for unrelated sites remains scope**, not stack traces — restricting site access
+so we are not on pages nobody is testing. See D5 and D12.
+
+
+---
+
+## D15 — Injecting into every frame, to reach controls inside iframes
+
+Controls inside iframes were invisible: content scripts run in the top frame only, so nothing in a
+frame was enumerated, clicked, or reachable by the pointer. Same-origin frames were handled first by
+walking into `contentDocument`, but cross-origin frames — which is what payment and widget iframes
+usually are — stayed out of reach.
+
+**`all_frames: true`** now injects both content scripts into every frame.
+
+**The problem that creates, and the fix.** `chrome.tabs.sendMessage` without a frame id goes to every
+frame and only one reply survives, so enumeration would describe a single arbitrary document. Frames
+must be addressed individually, which means knowing their ids — and a content script cannot read its
+own. So **each frame announces itself on load**, and the panel reads the id off `sender.frameId`. No
+`webNavigation` permission needed.
+
+- `sendAll` asks every known frame and merges the replies.
+- `sendTo` routes a click back to the frame the control came from.
+- A control's identity is now `frameId:selector`, because `data-sv-id` counters are per-document and
+  two frames can produce the same id.
+- Both methods are optional on `PageDriver`; a driver that knows nothing about frames still works and
+  simply sees the top document. That keeps the sweep testable without simulating frames.
+
+**The cost, stated plainly.** We now run inside every third-party frame on every page — ad frames,
+chat widgets, embedded players. This widens the blast radius that D5 and D12 already flagged, on a
+`<all_urls>` extension. It was chosen deliberately because a checkout flow that lives in an iframe is
+exactly what this tool exists to validate, but it makes the Phase 6 permissions work more pressing,
+not less.

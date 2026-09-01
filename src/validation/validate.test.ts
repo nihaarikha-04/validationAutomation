@@ -282,3 +282,33 @@ describe('validateEvent', () => {
     expect(result.extra).toEqual(['extra_thing']);
   });
 });
+
+describe('a payload with none of the expected fields', () => {
+  const ALL_OPTIONAL = schema(
+    field('page_url', 'string', false),
+    field('page_type', 'string', false),
+  );
+
+  /**
+   * Observed live: a sheet with no mandatory column meant every field was optional, and a payload
+   * read at the wrong nesting level had none of them. Every rule above was satisfied and the
+   * event passed — a green verdict on a payload where nothing was actually checked.
+   */
+  it('fails rather than passing on absence of evidence', () => {
+    const result = validateEvent({ user_key: 'ADGMOT35', sid: 1 }, ALL_OPTIONAL, AT);
+
+    expect(result.status).toBe('FAIL');
+    expect(result.missing).toEqual(['page_url', 'page_type']);
+  });
+
+  it('still passes when even one expected field is present', () => {
+    const result = validateEvent({ page_url: '/shop' }, ALL_OPTIONAL, AT);
+
+    expect(result.status).toBe('PASS');
+  });
+
+  /** An event the sheet describes no fields for has nothing to be absent. */
+  it('does not fail an event the sheet gives no fields', () => {
+    expect(validateEvent({ anything: 1 }, schema(), AT).status).toBe('PASS');
+  });
+});

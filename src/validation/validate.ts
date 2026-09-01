@@ -93,6 +93,15 @@ function decideStatus(
   if (requiredFailure || typeMismatches.length > 0) {
     return 'FAIL';
   }
+
+  // Nothing the sheet describes is present. Reached only when the sheet marks every field
+  // optional — the rules above would have failed it otherwise — and passing it would be a green
+  // verdict on a payload where not one expected field was found. Observed live: a sheet with no
+  // mandatory column plus a payload read at the wrong nesting level produced five such passes,
+  // each reporting every field missing. Absence of evidence is not a pass.
+  if (fields.length > 0 && fields.every((field) => field.status === 'missing')) {
+    return 'FAIL';
+  }
   if (options.extraFields === 'fail' && extra.length > 0) {
     return 'FAIL';
   }

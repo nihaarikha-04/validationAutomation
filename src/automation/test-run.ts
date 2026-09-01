@@ -1,5 +1,5 @@
 import type { ValidationResult } from '../validation/types';
-import { isConfident, isDestructive, type ActionCandidate, type ActionIntent } from './types';
+import { isConfident, type ActionCandidate, type ActionTarget } from './types';
 
 /**
  * The run's stages, following the plan's sequence:
@@ -25,7 +25,7 @@ export type RunState =
 export type ConfirmReason = 'low-confidence' | 'spends-money';
 
 export type RunEvent =
-  | { readonly kind: 'start'; readonly intent: ActionIntent }
+  | { readonly kind: 'start' }
   | { readonly kind: 'sdk-ready' }
   | { readonly kind: 'sdk-absent'; readonly diagnostic: string }
   | { readonly kind: 'sheet-missing' }
@@ -54,7 +54,20 @@ export const DEFAULT_TIMEOUTS: RunTimeouts = {
 };
 
 export interface RunContext {
-  readonly intent: ActionIntent;
+  readonly target: ActionTarget;
+  /**
+   * Decided when the run is planned, from the intent *and* the event name — so an event called
+   * `payment_completed` is gated even though it is not one of the curated ecommerce actions.
+   */
+  readonly destructive: boolean;
+  /**
+   * Click the best candidate even when detection is unsure.
+   *
+   * Off by default, because a wrong click on a client's live site is worse than no result. On,
+   * because a run that stops to ask produces no event and therefore no debug log — and seeing
+   * the log is usually the whole point. Destructive actions still always confirm.
+   */
+  readonly clickWhenUnsure: boolean;
   readonly now: number;
   readonly timeouts: RunTimeouts;
 }
@@ -98,7 +111,7 @@ export function advance(state: RunState, event: RunEvent, context: RunContext): 
     case 'manual-pick':
       // A human pointed at the element, so nothing is guessed and nothing needs confirming —
       // unless the action spends money, which always asks.
-      return isDestructive(context.intent)
+      return context.destructive
         ? { kind: 'awaiting-confirmation', candidate: event.candidate, reason: 'spends-money' }
         : { kind: 'executing', candidate: event.candidate, deadline: context.now + context.timeouts.executeMs };
 
@@ -133,10 +146,10 @@ function chooseCandidate(
     return { kind: 'awaiting-manual-pick' };
   }
 
-  if (isDestructive(context.intent)) {
+  if (context.destructive) {
     return { kind: 'awaiting-confirmation', candidate: best, reason: 'spends-money' };
   }
-  if (!isConfident(best)) {
+  if (!isConfident(best) && !context.clickWhenUnsure) {
     return { kind: 'awaiting-confirmation', candidate: best, reason: 'low-confidence' };
   }
 

@@ -172,7 +172,7 @@ describe('TestRunner', () => {
       events: new Map<string, EventSchema>([
         ['add_to_cart', { name: 'add_to_cart', fields: [field('product_id', true)] }],
         ['purchase', { name: 'purchase', fields: [field('order_id', true)] }],
-        ['newsletter_signup', { name: 'newsletter_signup', fields: [] }],
+        ['page_viewed', { name: 'page_viewed', fields: [] }],
       ]),
       warnings: [],
     };
@@ -182,13 +182,134 @@ describe('TestRunner', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Run all from sheet' }));
 
     // Money-spending and unmappable events are listed as skipped rather than quietly dropped.
-    expect(await screen.findByText('Spends money — run this one on its own.')).toBeInTheDocument();
     expect(
-      await screen.findByText('No page action maps to this event name — trigger it yourself.'),
+      await screen.findByText('Spends money or cannot be undone — run this one on its own.'),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        'Nothing on a page can be clicked to produce this — trigger it yourself.',
+      ),
     ).toBeInTheDocument();
     // add_to_cart is the one it can drive, and it started on its own.
     await waitFor(() => {
       expect(screen.getByText(/add_to_cart:/)).toBeInTheDocument();
+    });
+  });
+
+  it('keeps the captured debug log with the run that caused it', async () => {
+    const driver = driverReturning(candidates(candidate(0.95)));
+    const { rerender } = renderRunner({ driver });
+
+    await startRun();
+    await waitFor(() => {
+      expect(screen.getByText(/Waiting for the event/)).toBeInTheDocument();
+    });
+
+    const captured: CapturedPayload = {
+      id: 'p1',
+      at: NOW + 10,
+      eventName: 'add_to_cart',
+      args: ['[Smartech Debugger] Firing EVT:', { product_id: 'SKU123' }],
+      raw: JSON.stringify(['[Smartech Debugger] Firing EVT:', { product_id: 'SKU123' }]),
+      origin: 'intercepted',
+    };
+
+    rerender(
+      <TestRunner
+        driver={driver}
+        sheet={SHEET}
+        payloads={[captured]}
+        sdkReady
+        sdkDiagnostic={undefined}
+        now={() => NOW}
+      />,
+    );
+
+    // The run's own debug log is kept with its result, not just left in the global stream.
+    expect(await screen.findByText('PASS')).toBeInTheDocument();
+    expect(screen.getByText(/Smartech Debugger/)).toBeInTheDocument();
+    expect(screen.getByText('product_id')).toBeInTheDocument();
+  });
+
+  it('says when a run produced no debug log at all', async () => {
+    renderRunner({
+      driver: { send: () => Promise.resolve({ kind: 'error', message: 'No reply from the page.' }) },
+    });
+
+    await startRun();
+
+    // Recording happens in an effect, so the results list lands on a later render than the
+    // state line — await the list itself rather than the first "FAIL" to appear.
+    expect(
+      await screen.findByText('No debug log was captured for this run.'),
+    ).toBeInTheDocument();
+  });
+
+  it('names the events that did fire when the expected one did not', async () => {
+    const driver = driverReturning(candidates(candidate(0.95)));
+    const { rerender } = renderRunner({ driver });
+
+    await startRun();
+    await waitFor(() => {
+      expect(screen.getByText(/Waiting for the event/)).toBeInTheDocument();
+    });
+
+    // Something fired, just not what the sheet called it — the most useful thing to be told.
+    rerender(
+      <TestRunner
+        driver={driver}
+        sheet={SHEET}
+        payloads={[
+          {
+            id: 'other',
+            at: NOW + 5,
+            eventName: 'ATC',
+            args: [],
+            raw: '[]',
+            origin: 'intercepted',
+          },
+        ]}
+        sdkReady
+        sdkDiagnostic={undefined}
+        now={() => NOW + 20_000}
+      />,
+    );
+
+    expect(await screen.findByText('ATC')).toBeInTheDocument();
+  });
+
+  it('clicks an unsure match when told to, so a log is actually produced', async () => {
+    const sent: AutomationCommand[] = [];
+    renderRunner({
+      driver: driverReturning(candidates(candidate(0.54)), (command) => sent.push(command)),
+    });
+
+    fireEvent.click(screen.getByLabelText('Click best match even when unsure'));
+    await startRun();
+
+    // Without the toggle this run would stop at a dialog and capture nothing.
+    await waitFor(() => {
+      expect(sent.some((command) => command.kind === 'click')).toBe(true);
+    });
+  });
+
+  it('does not let one ambiguous element stall the rest of the batch', async () => {
+    const multi: EventSheet = {
+      events: new Map<string, EventSchema>([
+        ['add_to_cart', { name: 'add_to_cart', fields: [field('product_id', true)] }],
+        ['newsletter_signup', { name: 'newsletter_signup', fields: [] }],
+      ]),
+      warnings: [],
+    };
+
+    // Every detection comes back weak, so every run wants confirmation.
+    renderRunner({ driver: driverReturning(candidates(candidate(0.6))), sheet: multi });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run all from sheet' }));
+
+    // Seen live: the batch stopped on the first dialog and everything after it failed.
+    await waitFor(() => {
+      expect(screen.getAllByText('NEEDS REVIEW')).toHaveLength(2);
     });
   });
 

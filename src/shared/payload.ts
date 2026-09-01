@@ -12,6 +12,58 @@ export const CAPTURE_MARKER = 'smartech-validator/payload';
 export const CAPTURE_EVENT = 'smartech-validator:payload';
 
 /**
+ * Marks the periodic "here is what I am seeing" report.
+ *
+ * Capture that silently matches nothing is indistinguishable from capture that is broken — both
+ * show an empty list. This exists so the panel can say which, without anyone pasting a probe
+ * into a console.
+ */
+export const STATS_MARKER = 'smartech-validator/stats';
+
+/**
+ * Panel → page control channel.
+ *
+ * DevTools is bound to a single tab, so anything a click opens in a *new* tab is invisible to
+ * us: the inspected tab has nothing new, the sweep finds nothing and stops. Asking the page to
+ * keep navigation in this tab is the only way to follow it.
+ */
+export const CONTROL_EVENT = 'smartech-validator:control';
+
+/**
+ * Sent once by every frame's content script.
+ *
+ * Content scripts cannot read their own frame id, but the panel receives it on the message's
+ * sender — so a frame simply saying hello is how the panel learns to address it.
+ */
+export const HELLO_MARKER = 'smartech-validator/hello';
+
+export interface CaptureStats {
+  /** Console lines seen on this page since the script loaded. */
+  readonly seen: number;
+  /** How many of those carried a Smartech prefix. */
+  readonly matched: number;
+  /** The start of the most recent unmatched lines, so an unexpected format is visible. */
+  readonly recent: readonly string[];
+}
+
+export interface StatsMessage {
+  readonly marker: typeof STATS_MARKER;
+  readonly stats: CaptureStats;
+}
+
+export function isStatsMessage(message: unknown): message is StatsMessage {
+  if (typeof message !== 'object' || message === null) {
+    return false;
+  }
+  const candidate = message as { marker?: unknown; stats?: unknown };
+  return (
+    candidate.marker === STATS_MARKER &&
+    typeof candidate.stats === 'object' &&
+    candidate.stats !== null
+  );
+}
+
+/**
  * Values that survive the page → extension hop.
  *
  * Special JS values are tagged rather than dropped, because Phase 3 has to tell `null`,
@@ -175,6 +227,8 @@ export function toTransferable(
 export interface PayloadSource {
   /** Registers a listener and returns the function that unregisters it. */
   subscribe(listener: (payload: CapturedPayload) => void): () => void;
+  /** The same, for capture's periodic report on what it is seeing. */
+  subscribeStats(listener: (stats: CaptureStats) => void): () => void;
 }
 
 export function isCaptureMessage(message: unknown): message is CaptureMessage {

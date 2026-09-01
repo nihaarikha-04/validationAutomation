@@ -351,6 +351,334 @@ superseded by D10).
     "all tested" when several were never attempted.
   - Runs are ordered the way a shopper would do them, so a cart is filled before anything is removed
     from it.
+- *Extended 2026-09-01 — non-ecommerce events are driven too.* Detection no longer works from a fixed
+  list of five ecommerce actions; it takes a **target**, which is either a curated intent or keywords
+  derived from the event's own name. `newsletter_signup` searches the page for "newsletter signup",
+  "newsletter sign up", "newsletter", "signup" through the same strategies, so no hand-mapping is
+  needed for a sheet full of client-specific events.
+  - Words that describe the *event* rather than an action (`completed`, `viewed`, `success`) are
+    dropped — no button is ever labelled "completed". An event name made only of those, such as
+    `page_viewed`, is still listed as skipped, since nothing on a page can be clicked to cause it.
+  - Compound labels are handled: `signup` also searches for "sign up", `login` for "log in".
+  - **The safety gate no longer depends on the ecommerce list.** Destructiveness is decided when the
+    run is planned, from the intent *and* the event name, so `subscription_payment` is gated even
+    though it is not one of the five known actions. `RunContext` carries a `destructive` flag rather
+    than re-deriving it from an intent.
+  - *Bug caught by the new tests:* the name was lowercased before the camelCase split, so `wishlistAdd`
+    never split into "wishlist add".
+- *Three defects found on the first real client sheet (2026-09-01), all fixed:*
+  1. **Keyword matching ignored word boundaries.** Punctuation was stripped before a substring test,
+     so the token `zolo` from `Zolo_Searched` matched `class="zolostays-social-insta-feeds"` — the
+     brand name, present on nearly every element. Labels now reduce to space-separated words and
+     compare whole words.
+  2. **A batch stopped at the first dialog.** One low-confidence element left the run waiting for a
+     human, so every later event in the sheet reported a timeout. Runs that stop for a person are now
+     recorded **NEEDS REVIEW** with the reason and the batch continues; they stay runnable
+     individually.
+  3. **Commands could hang.** `chrome.tabs.sendMessage` never called back when the page was
+     mid-navigation, so the stage timed out with a misleading "timed out looking for the element".
+     The driver now bounds every reply and retries once when the failure looks like navigation.
+- *Known limitation confirmed live:* events needing input before the click — `Searched`, `Sign in` —
+  cannot be driven by clicking alone. The click lands but produces no event, reported honestly as "the
+  action ran but no matching event was captured". Driving these needs a recorded step sequence
+  (navigate, type, then click), which is not in the plan.
+- *Each run now keeps its own debug log.* A result used to be a verdict with no evidence — you could
+  see FAIL but not what was captured. Every run records the payload it was associated with and the
+  per-field verdict alongside the outcome, expandable in place. Single runs are recorded the same way
+  as batched ones, so the results list is the record either way. A run that captured nothing says so
+  explicitly rather than showing an empty box.
+- *Matching reworked after a second real sheet (2026-09-01).* Three separate faults, all from the
+  same place:
+  - **Any one word was enough to match.** `Zolo_Searched` matched a link labelled "ZOLO SCHOLAR" —
+    the brand name, on nearly every element. A name-derived target now requires **every** word.
+  - **Words had to be adjacent.** The sheet said `Schedule_visit`; the page says "Schedule a visit".
+    Words are matched independently rather than as a phrase.
+  - **No allowance for word endings.** `Searched` could not find a button labelled "Search", nor
+    `Registration` a "Register" link. Both sides are now stemmed, with prefix matching only where the
+    shared start is at least six characters — long enough for `regist`/`register`, short enough to
+    keep excluding `zolo`/`zolostays`.
+  - When nothing matches every word, detection falls back to the single most distinctive word (five
+    characters or more) at 0.6× confidence, so it asks rather than clicking on a partial match.
+- *Two reporting fixes from the same run:* "Nothing on the page matched" was read as an event-name
+  failure when it meant no *element* was found, so it now says so plainly; and a run that captured no
+  matching event now lists the events that **did** fire in its window — the single most useful thing
+  to know when a sheet name and a live event name disagree.
+- *Added "Click best match even when unsure" (2026-09-01), off by default.* A NEEDS REVIEW run never
+  clicks, so it produces no event and therefore no debug log — which read as the capture being broken
+  when it was the safety gate working. The toggle lets a batch click the best candidate regardless of
+  confidence, so a log exists to inspect. **Destructive actions still always confirm**, whatever the
+  toggle says. The NEEDS REVIEW message now explains that nothing was clicked and points at both ways
+  forward.
+- **Added "Sweep the page" (2026-09-01) — a second, inverted mode, at the user's request.**
+  Rather than deciding which control produces a given event and clicking that, it clicks *every*
+  control and reads whatever fires. The element→event guess is the step that failed repeatedly on
+  real sites (`zolo` matching a brand name, "no element matched", low-confidence stalls); this mode
+  removes that step entirely, so what a control is *called* stops mattering.
+  - `src/automation/sweep.ts` enumerates clickables and classifies each **safe / navigates /
+    destructive**. Only safe ones are clicked by default: a blind sweep would otherwise place
+    orders, delete items or sign the tester out.
+  - `navigates` is excluded by default because a click that leaves the page ends the sweep — every
+    remaining candidate belongs to a document that no longer exists. Three consecutive click
+    failures are treated as exactly that and stop the run with an explanation.
+  - The report is **coverage-shaped, not action-shaped**: every sheet event is PASS, FAIL or NOT
+    SEEN, with the per-field verdict where one exists. Events the site fires that the sheet does not
+    describe are listed separately — a finding in their own right.
+  - *Caught while testing:* the visibility check used `getClientRects`, which is empty in any
+    headless DOM, so it silently excluded everything and could not be tested. Replaced with computed
+    style, which behaves the same in both.
+- **Root cause of "no debug logs", found 2026-09-01: the prefix matcher was too narrow.** A probe run
+  on the live site showed 7 console lines, 0 matching — and the one match was the probe's own
+  synthetic line. Capture, transport and panel delivery were all working; the site simply logs
+  `console.info('Smartech debug', payload)` with no brackets, and the matcher required them. See D13.
+  Event names are now also read from the payload when the message does not carry one.
+  - *Process note:* three modes and a dozen fixes were built on top of this without verifying capture
+    after the transport change (D12). The eight-line probe that found it should have been written the
+    first time "no debug logs" was reported.
+- *Sweep made resilient to a changing page (2026-09-01).* It enumerated every control up front, so
+  the first click that opened a menu or re-rendered invalidated every remaining selector — three
+  failures later the sweep gave up, having clicked once. Observed live. Now:
+  - the page is **re-listed every round**, so controls that appear after a click are included and
+    stale selectors never accumulate;
+  - a selector that no longer matches returns `not-found` and is skipped, distinct from the page
+    being unreachable — only the latter counts toward stopping;
+  - **Escape is sent after each click**, closing modals and menus so the next control is not sitting
+    under an overlay;
+  - the loop is wrapped, so a thrown error is reported instead of freezing the progress line.
+- **Added site crawling (2026-09-01).** Sweeping one page only ever covers the events that page can
+  fire. `src/automation/crawl.ts` extracts `sweepPage` from the panel and adds `crawlSite`, which
+  sweeps the current page, collects the site's own links, and repeats on each up to a page limit.
+  - **Navigation is deliberate, never incidental.** Outbound-link clicking stays off during a sweep,
+    so the crawler leaves a page only by choosing to — which is what makes the click loop and the
+    page loop able to coexist.
+  - Same-origin links only, fragments and trailing slashes normalised so a site linking to itself
+    does not crawl forever.
+  - After navigating it polls until the content script on the new page answers, and gives up with a
+    reason rather than hanging.
+  - The sweep loop is now a plain async function with its dependencies injected, so the crawler and
+    the panel share it and both are testable against a scripted page rather than a browser.
+- **The end-to-end flow the user described is now the primary mode (2026-09-01):** crawl every page →
+  click everything → collect the debug logs → match each captured event to the sheet, exactly *or*
+  closely → validate the payload of whatever matched.
+  - *Close matching added, deliberately scoped.* `matchEvent` gains an opt-in fourth argument. Names
+    are compared as word sets (Dice coefficient, threshold 0.6), so `add_to_cart` credits a sheet
+    saying `Add to Cart` and `productViewed` credits `product_viewed`. **Exact matching remains the
+    default everywhere else**, and a close match is reported as `close`, never as `matched` — the row
+    reads "fired as `add_to_cart` — names differ", so the payload gets validated *and* the naming
+    disagreement stays a visible finding rather than being smoothed away. This is the loosening that
+    D-era notes warned against, made safe by never hiding it.
+  - *A visible pointer, on by default.* Every click animates a labelled cursor to the element,
+    outlines it, and pulses on contact. Automation that clicks invisibly cannot be trusted or
+    debugged — a wrong click and no click look identical. The overlay is inert and excluded from the
+    sweep's own enumeration so it can never click itself. Costs roughly half a second per click;
+    switchable off.
+- *Crawl fixed after it stayed on one page (2026-09-01), two causes:*
+  1. **Links were collected after the sweep.** A click that navigated or broke the page killed the
+     link fetch too, so the queue was never filled and the crawl ended at page one. Links are now
+     read *before* anything is clicked, so a page that dies mid-sweep still contributes its onward
+     links. Test asserts the ordering directly.
+  2. **No click budget per page.** Sixty clicks at over a second each meant two minutes on the home
+     page before the crawler would ever navigate — indistinguishable from not navigating at all.
+     Each page now gets a budget (default 20, adjustable).
+  - Each visited page reports how many links it offered, so "zero links found" — the other reason a
+    crawl legitimately ends early — is visible rather than guessed at.
+- *Limits removed (2026-09-01), at the user's request.* Pages and clicks-per-page both default to
+  unlimited (`0`), and the enumeration cap of 60 controls per page is gone — a sweep now offers every
+  clickable the page has.
+  - **A Stop button was added in the same change, not as a nicety.** With no limits, an unbounded
+    crawl of a real site has no natural end, and cancellation is the only way to end a run. It is
+    checked at every click and every page, so stopping is prompt rather than at the next boundary.
+  - The limits remain available for anyone who wants them; `0` simply means "no limit" rather than
+    the fields being removed.
+- *Sweep stuck on the navbar, fixed (2026-09-01).* Controls were identified by a structural selector
+  (`body > div > div:nth-of-type(3)`), which changes whenever a click re-renders the page. The sweep
+  therefore could not recognise controls it had already clicked, kept picking the first unvisited one
+  in document order, and never got past the navigation bar — which also explains why it never scrolled.
+  - Each control is now tagged with a `data-sv-id` attribute on first sight and addressed by that. The
+    tag travels with the element through re-renders, so "already clicked" means what it says. Tests
+    pin both properties: identity survives a re-render, and re-enumerating yields the same selector.
+  - A **scroll pass** now runs before enumerating each page, stepping down a viewport at a time so
+    content that loads on scroll is in the DOM before the sweep takes stock. Without it a sweep only
+    ever saw what rendered above the fold.
+  - *Cost, accepted:* the page is mutated with an inert attribute per control. It is the only thing
+    that survives a re-render, and it is reversible by reloading.
+- *Run-time limit added (2026-09-01):* 5 / 10 / 15 / 30 minutes, or "as long as it takes". Checked at
+  every click and page alongside the Stop button, so a long crawl can be time-boxed rather than
+  babysat.
+- *Synonymous event names are now recognised and explained, rather than reported as unknown.*
+  `matchEvent`'s close matching gained a synonym layer: industry-interchangeable words reduce to one
+  spelling (`login`/`Sign in`, `registration`/`Sign up`, `order_placed`/`Purchase`, `add_to_bag`/
+  `Add to Cart`, `searched`/`Search`).
+  - The match carries a **reason** — `formatting` when the words are the same and only the
+    punctuation differs, `synonym` when different words mean the same thing — and the report says
+    which: "fired as `login` — synonymous name". A payload that would previously have been dismissed
+    as UNKNOWN is now validated *and* the naming disagreement is stated.
+  - **`sign in` and `sign out` are deliberately kept apart**, with a test pinning it. Synonyms map to
+    phrases rather than single tokens precisely so those two cannot collapse into each other —
+    silently equating them would be worse than never matching at all.
+- *Console wrapper made less detectable (2026-09-01).* `console.log.toString()` now reports the
+  original source and keeps the original `name`, because analytics libraries check for tampering and
+  some go quiet when they think they are being watched — which would defeat observing them behaving
+  normally. See D14, which also records why our file appears atop unrelated libraries' stack traces
+  (Appcues, Freshdesk, Meta Pixel) and why that cannot be removed while we read console output.
+- **`smartech('debug','1')` now runs from the page, on every load (2026-09-01).** It was called once
+  from the panel when it opened, so a page reload — or any navigation during a crawl — silently
+  turned debug output back off and every page after the first captured nothing. The capture content
+  script now polls for the SDK (~12s, since the snippet loads asynchronously) and enables debug
+  itself. Running at `document_start` on every page means every page gets it, panel open or not.
+- **Capture now reports what it is seeing.** A periodic line in the panel says how many console lines
+  were watched, how many looked like Smartech, and — when none did — the start of the most recent
+  unmatched lines. This is the diagnostic whose absence cost days on the previous site: an empty list
+  meant either "no Smartech output" or "output we do not recognise", and nothing distinguished them
+  without pasting a probe into a console. See D13.
+- **Repeated controls are no longer clicked repeatedly (2026-09-01).** A grid of forty product tiles
+  that all fire `product_view` was costing forty clicks to learn one thing. Controls are now grouped
+  by what they are — tag plus class list, falling back to the parent for context when an element has
+  no classes of its own, so unadorned buttons in different regions are not lumped together.
+  - Once one member of a group produces an event, the rest are skipped: the payload has already been
+    captured and validated, and the thirty-nine others add nothing.
+  - A group that produces nothing gets three tries before being written off, so a silent grid costs
+    three clicks rather than forty.
+  - The count of skipped repeats is reported per page and in total, so the saving is visible and a
+    group wrongly collapsed would be noticeable rather than silent.
+- *Two bugs that stopped a click's destination being explored (2026-09-01):*
+  1. **Element ids collided across pages.** The counter restarted at 1 on every load, so after a
+     click navigated, the new page's controls were already in the sweep's "clicked" set and nearly
+     all were skipped. Ids now carry a per-load stamp.
+  2. **A sweep that navigated abandoned where it landed.** Clicking a product tile opened the product
+     page and the sweep simply ended, so its Add to Cart was never reached. `sweepPage` now reports
+     where a click took it, and the crawler sweeps that page next — without re-navigating, since it
+     is already there. That is what makes tile → product page → Add to Cart work as one chain.
+- *Overlays are now explored rather than closed (2026-09-01).* Escape was sent after **every** click
+  to stop a modal blocking the controls beneath it — which meant a modal opened by a click was closed
+  before its own buttons were ever enumerated, so nothing inside an overlay was ever tested. Dismissal
+  is now lazy: a click that opens a modal leaves it open, the next round enumerates and clicks its
+  contents, and Escape is sent only once nothing clickable remains — revealing the page underneath and
+  continuing there. Two tests pin the ordering in both directions.
+- *Clicks that open a **new tab** are now followed (2026-09-01).* DevTools is bound to one tab, so a
+  product that opened in a second tab was invisible: the inspected tab had nothing new, the sweep
+  found nothing and exited — which read as "it just exits". Two changes keep navigation where we can
+  see it:
+  - `target="_blank"` is stripped from the link for the duration of the click and put back after;
+  - `window.open` is redirected into the inspected tab while a sweep runs, via a control event, and
+    restored to the exact original reference afterwards. Rewriting a page's navigation is a real
+    change to its behaviour and has no business being on when nobody is testing.
+  - The crawler's existing follow-the-click logic then treats it as ordinary navigation and sweeps
+    where it landed.
+- *An overlay that changes the URL no longer ends the sweep (2026-09-01).* The "a click navigated,
+  stop here" check compared URLs, and a single-page quick-view pushes a route without loading a
+  page — so the sweep returned the instant any overlay opened, which in plain sweep mode ended the
+  whole run. A **document stamp** now distinguishes the two: it changes only on a real page load, so
+  a route change within the same document leaves the sweep running and the overlay's controls get
+  clicked, while a genuine navigation still hands off to the crawler.
+- *The crawler no longer ignores overlays (2026-09-01).* Their controls were being clicked, but the
+  crawl treated a page as something it had navigated to, so overlays were invisible to it in two
+  ways:
+  - **Links revealed by an overlay were never collected.** Link-gathering had been moved to *before*
+    the sweep so a page-breaking click could not lose the queue; that also meant anything a click
+    opened was never looked at. Links are now gathered both before and after, and merged.
+  - **An overlay's route was never recorded.** Routes pushed without a page load are now reported per
+    page ("overlays: /product/1") **and queued for a proper visit** — the same URL loaded as a page
+    can fire different events than it does as a panel, so sweeping it in place is not a substitute.
+- *Same-origin iframes are now swept (2026-09-01).* Content scripts run in the top frame only, so
+  anything inside an iframe was invisible — never enumerated, never clicked, unreachable by the
+  pointer. Enumeration now walks into same-origin frames, the click command searches them, and the
+  pointer adds the frame's own offset so it lands on the right element rather than somewhere in the
+  top document.
+  - **Cross-origin frames remain out of reach** and are now *counted and reported* per page rather
+    than silently reducing coverage. Reaching into them needs `all_frames: true` plus frame-targeted
+    messaging, which widens injection to every third-party frame on every site — squarely against
+    the scope concern already raised.
+  - *Decision taken 2026-09-01:* `all_frames: true` was adopted, so cross-origin frames are reachable
+    too. Frames announce themselves on load so the panel learns their ids from `sender.frameId`;
+    `sendAll` merges every frame's controls and `sendTo` routes each click back to the frame it came
+    from. Control identity became `frameId:selector`, since per-document ids can collide across
+    frames. See D15 — including the cost: we now run inside every third-party frame on every page,
+    which makes the Phase 6 permissions work more pressing rather than less.
+  - *Frame discovery fixed (2026-09-01):* frames announced themselves at page load, but the panel's
+    listener only starts when the panel opens — so on any page that loaded first, every announcement
+    was missed and the driver knew only the top frame. The panel now **asks** every frame to report
+    itself before enumerating, and each answers with its own message (a broadcast `sendResponse`
+    delivers only one reply, so answering that way would have lost all but one).
+  - Each page reports how many frames answered ("3 frames" / "top frame only"), so a discovery
+    failure is visible rather than showing up as quietly reduced coverage.
+- *Three fixes from the first working click log (2026-09-01):*
+  1. **Links are now clicked while crawling.** Most controls on a storefront are `<a href>` — tiles,
+     categories — classified `navigates` and skipped. That default predates the crawler being able to
+     follow navigation; it now means the crawl barely touched the page. Links are included
+     automatically in crawl mode, and the checkbox says so.
+  2. **Wrapper labels were unreadable** — a card reported as "Mary JaneView CartFree Shipping
+     unlocked 🎉2", the concatenated text of everything inside it. A control is now named by its own
+     text nodes, falling back to inner text only when it has none of its own.
+  3. **"(unnamed)" told us nothing** about a payload with no recognisable name. The log now lists the
+     payload's own fields instead, which shows whether a name is hiding under a key we do not know.
+- *Sweeping now carries on by itself when the page changes (2026-09-01), on by default.* Landing on a
+  new page previously meant pressing the button again. The panel listens to DevTools' own navigation
+  events — no extra permission — and starts a sweep of wherever browsing went. It only fires when
+  nothing is already running, since a crawl navigates constantly by design and would otherwise tear
+  itself down and restart on every page it visited.
+- *Open, and probably not a code problem: iframes still not clicked.* The most likely cause is
+  Chrome's per-extension **site access** being set to "On specific sites" — a cross-origin iframe is a
+  *different* origin from the page, so its content script never runs and the frame never answers. The
+  per-page frame count ("3 frames" / "top frame only") is the diagnostic. If it reads "top frame only"
+  with site access on all sites, the remaining candidates are sandboxed frames (which block scripts
+  outright and cannot be worked around) or frames added after enumeration.
+- *Site access was confirmed as "on all sites", so the cause is elsewhere.* Rather than guess a fourth
+  time, the panel now **lists the frames that answered** — id and URL — per visited page. Guessing why
+  iframes are missed is not diagnosis; the list distinguishes "no frame answered" (injection or
+  discovery failing) from "frames answered but held no controls" (enumeration), which need different
+  fixes.
+- **Forms can now be filled before clicking (2026-09-01), at the user's request.** Events that need
+  input — `Searched`, `Sign in` — were unreachable however thorough the sweep was: an empty search
+  box produces no search event. The panel takes `field: value` rules (search, email, phone, pincode,
+  name and so on, editable), and the sweep types them into matching fields before enumerating, and
+  again after each click, since a click can reveal a form that was not there a moment ago.
+  - Fields are matched on name, id, placeholder, aria-label or wrapping label text.
+  - Values are set through the native property setter followed by input/change events — a plain
+    assignment is ignored by frameworks that track their own value, so the field would look filled
+    and submit empty.
+  - **Passwords are never filled**, and fields the user already filled are left alone. Filling a
+    password and clicking submit is how an unattended sweep signs itself into a real account.
+  - Fields inside frames are filled too.
+- **The sweep now stops and hands unknown forms to the tester (2026-09-01).** Pre-written values only
+  cover fields we can guess at, and no list ever covers what an arbitrary site asks for. When a
+  control would submit a form that still has blank fields, the sweep pauses and the panel names them
+  — "Phone number", "OTP" — as the page itself labels them. The tester fills the form in the browser
+  and chooses **continue**, **skip this one**, or **stop**.
+  - Detection is by intent, not guesswork: a `type="submit"`, anything inside a `<form>`, or wording
+    like Search / Verify / Continue / Sign in. An ordinary Close button never triggers it.
+  - Fields already filled — by the tester or by the value rules — are not counted, so a form that is
+    ready to go is simply clicked.
+  - **Time spent waiting is added back to the run limit**, so a 10-minute crawl is not consumed by
+    someone typing an OTP.
+  - The `field: value` rules remain for the fields that *are* predictable, mostly search boxes; they
+    reduce how often the sweep has to stop rather than replacing the pause.
+- **Hovering and dwelling were added alongside clicking (2026-09-01).** A whole class of events is
+  produced by the pointer arriving and resting, or by a region coming into view and staying there,
+  and no amount of clicking will ever fire one — they were unreachable however thorough a sweep
+  was. Two triggers now run as part of every sweep, both on by default:
+  - **Hover with dwell before each click.** The pointer is moved onto the control, left there for
+    700ms, then moved off — over/out *and* enter/leave, with coordinates, since a page may listen
+    for either pair and handlers commonly read the position. 700ms clears the 300–500ms
+    hover-intent thresholds sites use, so a deliberate hover is not read as the pointer passing
+    over on its way somewhere else. This is also what a visitor does on the way to clicking, so a
+    sheet's `Banner` event — `hover_time` plus `banner_click` — is produced by one gesture.
+  - **A dwell at each step of the scroll pass.** The pass already existed but rested 180ms per
+    step, purely to load lazy content. It now rests 1.2s when observing, because anything driven
+    by an IntersectionObserver with a time threshold needs the page to actually stop where it is.
+  - *Cost:* one hover per control **group**, not per control, so the existing repeat-collapsing
+    caps it. Switching the toggle off restores the previous timings exactly.
+  - **The capture window opens before the hover, not after.** A `hover_time` fires on the way out
+    of the hover — before the click — so a window opened after hovering would have lost it and the
+    control would have looked silent. A test pins this.
+- *Deliberately not built: faking page lifecycle.* `Session Engagement Summary` and the idle/active
+  timers flush on `visibilitychange`/`pagehide`. A synthetic event can be dispatched, but
+  `document.visibilityState` cannot be changed from the isolated world, so any handler that reads
+  the property — which is most of them — would see `visible` and ignore the event. Spoofing it
+  would mean patching the property from the MAIN-world capture script, which is a real and risky
+  mutation of the page for an unverified gain. Left alone until there is evidence it is needed.
+- *Still to be measured:* how far this moves real coverage. The estimate that gating rather than
+  detection is the main gap is read off the event sheet, not observed — the next run on a
+  logged-in session is what settles it.
 
 ---
 
@@ -358,15 +686,103 @@ superseded by D10).
 
 **Goal:** Turn results into something reviewable and reusable across sessions.
 
-- [ ] Full dashboard (site, SDK/debug status, event sheet name, event count, tests completed/passed/failed/not-tested)
-- [ ] Event details view per event (expected vs actual, per-attribute status table, raw object viewer)
+- [x] Full dashboard (site, SDK status, event sheet name, event count, tests passed/failed/not-tested) — debug status still lives in the status bar, not the dashboard
+- [x] Event details view per event (expected vs actual, per-attribute status table, raw object viewer)
 - [ ] Test history stored in IndexedDB — open / delete / export past runs
 - [ ] Client profiles (client name, website, event sheet, platform, notes) for repeat testing without reconfiguring
-- [ ] Export: JSON
-- [ ] Export: CSV
+- [x] Export: JSON
+- [x] Export: CSV
 - [ ] Export: XLSX (summary sheet + detailed per-attribute sheet + raw debug objects sheet) — written as a **new** report file, never back into the uploaded Event Sheet
 
 **Exit criteria:** Complete the full MVP acceptance flow end to end (spec section 45) and export a report in all three formats without modifying the original Event Sheet.
+
+**Phase 5 record — 2026-09-01 (in progress)**
+
+- *Status:* PARTIAL. Dashboard, per-event detail, JSON and CSV export are done and verified. History,
+  client profiles and XLSX export are **not started** — see below.
+- *New pure module* (`src/reports/`): `types.ts` (`RunReport`, `EventOutcome`, `RunTotals`),
+  `build.ts` (`buildReport`, `reportFileName`), `export-csv.ts`. No DOM, no `chrome.*`, no clock —
+  the run's moment is passed in.
+- *Verdict logic moved out of the component.* `PageSweep.tsx` had been matching events and calling
+  `validateEvent` inside a React component, against the project's own rule that components render
+  state rather than compute verdicts. That logic is now `buildReport`, which is what the dashboard,
+  the detail view and both exports all read from — previously nothing but the component could see it.
+- *`NOT SEEN` is deliberately not a failure*, and the dashboard says so in words. An event that never
+  fired may be unimplemented or may sit behind a flow the run never reached; the run has no evidence
+  which, and reporting it as FAIL would manufacture defects. Two tests pin it.
+- *An event that fired without a readable payload counts as untested, not passed* — nothing was
+  checked, so counting it as a pass would inflate the passing total.
+- *Every report states its channel.* `channel: 'debug-payload'` is a field on the report and a line
+  on the dashboard, so no reader can assume the network call was verified when it was not. Required
+  by the Terminology section above; tested at both the builder and the component.
+- *CSV is one flat row per checked field*, repeating the event name, because a spreadsheet user's
+  first move is to filter a column. Values beginning `=`, `+`, `-` or `@` are prefixed with a tab:
+  an Event Sheet is untrusted input and must never arrive as something Excel offers to evaluate.
+  Tested.
+- *Downloading happens at the composition root.* `browser-download.ts` is the only new file touching
+  the DOM; `App` takes a `download` prop from `main.tsx` and passes it down. No `downloads`
+  permission was needed — the manifest is unchanged.
+- *Verified:* `pnpm build` clean, `pnpm test` 414/414 across 27 files (18 new in `src/reports/`,
+  6 in `Dashboard.test.tsx`). Not yet exercised against a live site.
+- *Deliberately deferred, with reasons:*
+  - **XLSX export.** `read-excel-file` cannot write, so this needs a new dependency, and the project
+    requires a stated reason for one. The realistic options — SheetJS, or a minimal writer over a zip
+    library — differ enough in weight and supply-chain risk that the choice should be made
+    deliberately rather than folded into this pass.
+  - **Test history in IndexedDB** and **client profiles.** Both are storage concerns rather than
+    reporting ones, and both need `RunReport` to be stable first. It now is, and it was designed to be
+    serialisable for exactly this reason.
+- **Two defects the first live report exposed, both fixed (2026-09-01).** A run against ethniq.com
+  reported 5 passed / 0 failed / 75 not seen. All five passes were false.
+  1. **The wrong object was being validated.** Smartech logs a session *envelope* — `user_key`,
+     `sid`, `url`, `eventname` — with the event's own fields nested one level down under `payload`.
+     `payloadSubject` returned the envelope, so the sheet's fields were compared against session
+     bookkeeping: every expected field read `missing` and every real field read `extra` as
+     `payload.*`. `unwrapEnvelope` now descends one level, and only when the outer object also
+     names the event — a payload that merely has a `data` key of its own is a payload, not an
+     envelope, and descending into it would validate a fragment. `activity_params` and
+     `activity_name` are recognised too, since that is the shape Netcore's own activity API uses.
+  2. **A payload with none of the expected fields passed.** The sheet had no mandatory column, so
+     every field was optional; nothing was required, nothing mismatched, and the event went green
+     with all five fields missing. `decideStatus` now fails an event where every expected field is
+     absent. Absence of evidence is not a pass — that verdict is the one thing a validator must
+     never get wrong. An event the sheet gives no fields is unaffected.
+- *Confirmed by the same report: merged sub-events are being fired inside their parent, as the
+  sheet's PayloadTab specifies.* `cart viewed` arrived carrying `product_id`, `variant`,
+  `new_quantity`, `removed_product_ids` and `removed_count` — the fields belonging to Cart Drawer
+  Opened, Cart Item Quantity Changed (Drawer) and Cart Items Removed (Drawer). Those three are
+  listed NOT SEEN and always will be; they have no event names of their own. The denominator work
+  noted below is what makes that legible rather than misleading.
+- *Also visible in that report, still open:* event names carry the sheet's own inline notes —
+  `"Subscription Payment Failed\nneed to pass in checkour event"` — because the note sits in the
+  event-name column. They match nothing and inflate the sheet's event count.
+- **Two guards were skipping most of the cart drawer, both narrowed (2026-09-01).** A run on the
+  cart overlay showed the sweep paused on a discount box, with the drawer's own controls untouched.
+  The overlay was being enumerated correctly; the controls inside it were being filtered out before
+  they were ever clicked.
+  1. **The destructive guard matched bare words.** `order`, `remove`, `delete`, `cancel` and
+     `subscribe` on their own classified a large part of every site as money-spending: "Order
+     Details", "Order Tracking", "Reorder" and "My Orders" all contain `order`; a cart line's remove
+     button contains `remove`; "Newsletter Subscribe" contains `subscribe`; every dialog's Cancel
+     button contains `cancel`. Several of those produce events the sheet asks for — `Remove from
+     Cart`, `Order Details Viewed`, `Order Tracking Clicked`, `Reorder Clicked`,
+     `Newsletter Subscribed`, `Address Deleted` — so the guard was hiding exactly what the run
+     existed to find. It now matches phrases: `place order`, `delete my account`,
+     `cancel subscription`, `proceed to pay`. Bare `order`, `remove`, `delete` and `cancel` are
+     safe. Same reasoning as the `sign in`/`sign out` split — the distinction lives in the phrase.
+     Tests pin both directions, including the previous behaviour that changed.
+  2. **The form pause stopped for optional fields.** A cart drawer's Apply button sits beside a
+     DISCOUNT CODE box, so `formNeeds` reported a blank field and the sweep stopped to ask a human
+     — on every cart, before any drawer control had been clicked. One pause blocked the whole
+     overlay. Where a page marks fields required, only those now count; where it marks nothing,
+     every blank field still counts except names that are optional by definition (discount, coupon,
+     promo, voucher, gift card, referral). An OTP or address form still stops the run.
+- *Worth noting for whoever reads the earlier overlay work:* none of the overlay handling was wrong.
+  Enumeration, lazy dismissal and route capture all did their job. The controls were found and then
+  discarded by a filter, which is why it read as "overlays are not tracked".
+- *Not yet done from this phase's checklist:* the dashboard shows the run's own totals but is not
+  wired to the SDK/debug status bar as a single view; the two still render separately.
+
 
 ---
 

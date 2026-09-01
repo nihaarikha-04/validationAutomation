@@ -180,6 +180,105 @@ describe('debug-capture', () => {
     }
   });
 
+  it('captures a bare "Smartech debug" line, with no brackets', async () => {
+    await install();
+
+    // The real shape on a live client site. Requiring brackets rejected every one of these.
+    console.info('Smartech debug', { eventName: 'Add to Cart', product_id: 'SKU123' });
+    await flush();
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.payload.eventName).toBe('Add to Cart');
+  });
+
+  it('reads the event name from the payload when the message does not name it', async () => {
+    await install();
+
+    console.info('Smartech debug', { event_name: 'purchase', total: 499 });
+    await flush();
+
+    expect(captured[0]?.payload.eventName).toBe('purchase');
+  });
+
+  it('finds an event name nested inside the payload', async () => {
+    await install();
+
+    console.info('Smartech debug', { data: { evtName: 'Sign in' } });
+    await flush();
+
+    expect(captured[0]?.payload.eventName).toBe('Sign in');
+  });
+
+  it('prefers the name in the message over one in the payload', async () => {
+    await install();
+
+    console.log(LINE, { eventName: 'something else' });
+    await flush();
+
+    expect(captured[0]?.payload.eventName).toBe('Add to Cart');
+  });
+
+  it('still ignores other libraries that log objects', async () => {
+    await install();
+
+    console.log('Firebase: Firebase App named [DEFAULT] already exists', { eventName: 'nope' });
+    await flush();
+
+    expect(captured).toEqual([]);
+  });
+
+  it('does not advertise itself to libraries that sniff console', async () => {
+    const before = console.log.toString();
+    await install();
+
+    // Libraries check this and can go quiet when they think they are being watched.
+    expect(console.log.toString()).toBe(before);
+    expect(console.log.toString()).not.toContain('capture(');
+    expect(console.log.name).toBe('log');
+  });
+
+  it('turns Smartech debug output on by itself', async () => {
+    const calls: unknown[][] = [];
+    Reflect.set(window, 'smartech', (...args: unknown[]) => {
+      calls.push(args);
+    });
+
+    await install();
+    // The SDK is polled for, so give the first tick a chance to fire.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    // The panel used to do this once on open, so a navigation silently lost debug mode.
+    expect(calls).toContainEqual(['debug', '1']);
+    Reflect.deleteProperty(window, 'smartech');
+  });
+
+  it('keeps waiting when the SDK has not loaded yet', async () => {
+    await install();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const calls: unknown[][] = [];
+    Reflect.set(window, 'smartech', (...args: unknown[]) => {
+      calls.push(args);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    // The snippet loads asynchronously, so absence at document_start proves nothing.
+    expect(calls).toContainEqual(['debug', '1']);
+    Reflect.deleteProperty(window, 'smartech');
+  });
+
+  it('sends window.open into this tab when asked, and restores it after', async () => {
+    await install();
+    const native = window.open;
+
+    document.dispatchEvent(new CustomEvent('smartech-validator:control', { detail: 'same-tab' }));
+    expect(window.open).not.toBe(native);
+
+    // Rewriting a page's navigation has no business being on when nobody is testing.
+    document.dispatchEvent(new CustomEvent('smartech-validator:control', { detail: 'restore' }));
+    expect(window.open).toBe(native);
+  });
+
   it('installs only once', async () => {
     await install();
     const wrapped = console.log;

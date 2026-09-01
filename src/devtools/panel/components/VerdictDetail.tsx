@@ -26,6 +26,16 @@ export function VerdictDetail({ verdict }: VerdictDetailProps) {
   const { result } = verdict;
 
   return (
+    <>
+      {verdict.firedAs === undefined ? null : (
+        <p className="verdict__note">
+          The site calls this <code>{verdict.firedAs}</code>; the Event Sheet calls it{' '}
+          <code>{result.eventName}</code>.{' '}
+          {verdict.matchReason === 'synonym'
+            ? 'Different words for the same thing — validated against the sheet, but the names disagree.'
+            : 'Same words, formatted differently — validated against the sheet, but the names disagree.'}
+        </p>
+      )}
     <table className="verdict__table">
       <thead>
         <tr>
@@ -59,5 +69,6 @@ export function VerdictDetail({ verdict }: VerdictDetailProps) {
         ))}
       </tbody>
     </table>
+    </>
   );
 }
