@@ -29,11 +29,12 @@ function fired(eventName: string, payload: TransferableValue, at = AT): Captured
 }
 
 const CART: EventSchema = {
+  source: 'unknown',
   name: 'Add to Cart',
   fields: [field('product_id', 'string', true), field('price', 'number', true)],
 };
 
-const LOGIN: EventSchema = { name: 'Sign in', fields: [field('mobile_number', 'string', true)] };
+const LOGIN: EventSchema = { name: 'Sign in', fields: [field('mobile_number', 'string', true)], source: 'unknown' };
 
 describe('buildReport', () => {
   it('lists every sheet event, including the ones that never fired', () => {
@@ -50,7 +51,9 @@ describe('buildReport', () => {
       CONTEXT,
     );
 
-    expect(report.totals).toEqual({ events: 2, tested: 1, passed: 1, failed: 0, notTested: 1 });
+    expect(report.totals).toEqual({
+      events: 2, tested: 1, passed: 1, failed: 0, notTested: 1, apiOnly: 0, reachable: 2,
+    });
   });
 
   it('counts a payload missing a required field as failed', () => {
@@ -149,5 +152,109 @@ describe('reportFileName', () => {
     const report = buildReport(sheetOf(CART), [], { ...CONTEXT, site: '' });
 
     expect(reportFileName(report, 'json')).toMatch(/^smartech-site-/);
+  });
+});
+
+describe('buildReport, events the sheet says are fired from a server', () => {
+  const apiEvent: EventSchema = { name: 'Order Placed', fields: [], source: 'api' };
+
+  it('marks an unseen API event as API ONLY rather than never fired', () => {
+    // Reporting a server-fired event as NOT SEEN blames the site for the tool's blind spot: no
+    // amount of clicking can produce it, so it is not evidence of anything.
+    const report = buildReport(sheetOf(apiEvent), [], CONTEXT);
+
+    expect(report.events[0]?.status).toBe('API ONLY');
+  });
+
+  it('keeps API events out of the reachable denominator and the untested count', () => {
+    const report = buildReport(sheetOf(CART, apiEvent), [], CONTEXT);
+
+    expect(report.totals).toMatchObject({
+      events: 2,
+      reachable: 1,
+      apiOnly: 1,
+      notTested: 1,
+    });
+  });
+
+  it('validates an API event normally if it does turn up in the browser', () => {
+    // The sheet can be wrong about the source. Something that actually fired is real evidence.
+    const report = buildReport(
+      sheetOf({ ...apiEvent, fields: CART.fields }),
+      [fired('Order Placed', { product_id: 'SKU1', price: 10 })],
+      CONTEXT,
+    );
+
+    expect(report.events[0]?.status).toBe('PASS');
+  });
+});
+
+describe('buildReport, events the sheet merged into another', () => {
+  const parent: EventSchema = {
+    name: 'Page View (Front End)',
+    source: 'frontend',
+    fields: [field('page_url', 'string', true)],
+  };
+  const child: EventSchema = {
+    name: 'Page Idle Time',
+    source: 'frontend',
+    // The sheet writes the parent without its qualifier, so resolving it needs close matching.
+    mergeInto: 'Page View',
+    fields: [field('idle_duration', 'number', true)],
+  };
+
+  it('checks a merged event inside its parent payload instead of calling it never fired', () => {
+    const report = buildReport(
+      sheetOf(parent, child),
+      [fired('Page View (Front End)', { page_url: '/profile', idle_duration: 20000 })],
+      CONTEXT,
+    );
+
+    const outcome = report.events.find((event) => event.eventName === 'Page Idle Time');
+    expect(outcome?.status).toBe('PASS');
+    expect(outcome?.checkedIn).toBe('Page View (Front End)');
+  });
+
+  it('fails a merged event whose fields are absent from the parent payload', () => {
+    const report = buildReport(
+      sheetOf(parent, child),
+      [fired('Page View (Front End)', { page_url: '/profile' })],
+      CONTEXT,
+    );
+
+    expect(report.events.find((event) => event.eventName === 'Page Idle Time')?.status).toBe('FAIL');
+  });
+
+  it('does not report the rest of the parent payload as undocumented on the child', () => {
+    const report = buildReport(
+      sheetOf(parent, child),
+      [fired('Page View (Front End)', { page_url: '/profile', idle_duration: 1, unrelated: 'x' })],
+      CONTEXT,
+    );
+
+    expect(report.events.find((event) => event.eventName === 'Page Idle Time')?.result?.extra)
+      .toEqual([]);
+  });
+
+  it('is NOT SEEN while the parent has not fired either', () => {
+    const report = buildReport(sheetOf(parent, child), [], CONTEXT);
+
+    expect(report.events.find((event) => event.eventName === 'Page Idle Time')?.status)
+      .toBe('NOT SEEN');
+  });
+
+  it('flags a merged event that fired on its own, and still validates it', () => {
+    // The sheet said it must not fire separately. It did, so the two disagree — but the payload
+    // it carried is still evidence and is checked.
+    const report = buildReport(
+      sheetOf(parent, child),
+      [fired('Page Idle Time', { idle_duration: 20000 })],
+      CONTEXT,
+    );
+
+    const outcome = report.events.find((event) => event.eventName === 'Page Idle Time');
+    expect(outcome?.firedSeparately).toBe(true);
+    expect(outcome?.status).toBe('PASS');
+    expect(outcome?.checkedIn).toBeUndefined();
   });
 });

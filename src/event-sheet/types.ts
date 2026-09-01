@@ -11,6 +11,7 @@ export const COLUMN_ROLES = [
   'required',
   'description',
   'example',
+  'source',
 ] as const;
 
 export type ColumnRole = (typeof COLUMN_ROLES)[number];
@@ -33,6 +34,7 @@ export interface ColumnMapping {
   readonly required?: number;
   readonly description?: number;
   readonly example?: number;
+  readonly source?: number;
 }
 
 export type ColumnCandidates = Readonly<Record<ColumnRole, readonly number[]>>;
@@ -79,9 +81,30 @@ export interface FieldSchema {
   readonly example: string;
 }
 
+/**
+ * Where an event is fired from, which decides whether this tool can ever see it.
+ *
+ * An `api` event is sent server-to-server and never touches the page, so it cannot be captured
+ * from the browser however thoroughly a site is exercised. Reporting one as NOT SEEN alongside a
+ * frontend event that genuinely failed to fire states two very different things in the same
+ * words. `unknown` when the sheet does not say.
+ */
+export type EventSource = 'frontend' | 'api' | 'unknown';
+
 export interface EventSchema {
   readonly name: string;
   readonly fields: readonly FieldSchema[];
+  readonly source: EventSource;
+  /**
+   * The event this one was folded into, exactly as the sheet spelled it, when the sheet says it
+   * must not fire separately.
+   *
+   * Its fields are then expected inside the parent's payload rather than under their own event
+   * name, so the parent's payload is where they have to be checked. Unresolved on purpose: the
+   * sheet writes `"Product Viewed"` where the event is called `Product Viewed (Front End)`, and
+   * reconciling those two is the matcher's job, not the parser's.
+   */
+  readonly mergeInto?: string;
 }
 
 export interface EventSheet {

@@ -1,149 +1,4 @@
-import { documentsIn } from './sweep';
-
-/** "If a field looks like `match`, type `value` into it." */
-export interface FieldRule {
-  readonly match: string;
-  readonly value: string;
-}
-
-/**
- * Sensible starting values. A search box that is empty produces no search event, and a login
- * form with no phone number produces no sign-in — those events are unreachable by clicking alone.
- *
- * Passwords are deliberately absent: filling one and clicking submit is how an automated sweep
- * signs itself into, or out of, a real account.
- */
-export const DEFAULT_FIELD_RULES: readonly FieldRule[] = [
-  { match: 'search', value: 'shoes' },
-  { match: 'query', value: 'shoes' },
-  { match: 'email', value: 'qa.test@example.com' },
-  { match: 'phone', value: '9876543210' },
-  { match: 'mobile', value: '9876543210' },
-  { match: 'pincode', value: '560001' },
-  { match: 'zip', value: '560001' },
-  { match: 'name', value: 'QA Test' },
-  { match: 'city', value: 'Bengaluru' },
-];
-
-const FILLABLE =
-  'input[type="text"], input[type="search"], input[type="email"], input[type="tel"], ' +
-  'input[type="number"], input[type="url"], input:not([type]), textarea, select';
-
-/**
- * Types the supplied values into whatever fields look like they want them.
- *
- * Values are set through the native property setter and followed by input/change events, because
- * frameworks track their own value and ignore a plain assignment — the field would look filled
- * and submit empty.
- */
-export function fillFields(root: Document, rules: readonly FieldRule[]): number {
-  let filled = 0;
-
-  for (const document of documentsIn(root)) {
-    for (const field of document.querySelectorAll(FILLABLE)) {
-      if (!isFillable(field) || describes(field) === '') {
-        continue;
-      }
-
-      const rule = rules.find((entry) => matches(field, entry.match));
-      if (rule === undefined) {
-        continue;
-      }
-
-      if (applyValue(field, rule.value)) {
-        filled += 1;
-      }
-    }
-  }
-
-  return filled;
-}
-
-function isFillable(field: Element): boolean {
-  if (field.hasAttribute('disabled') || field.hasAttribute('readonly')) {
-    return false;
-  }
-  // Never a password: filling one and submitting is how a sweep signs into a real account.
-  if (field.getAttribute('type') === 'password') {
-    return false;
-  }
-
-  const view = field.ownerDocument.defaultView;
-  if (view !== null) {
-    const style = view.getComputedStyle(field);
-    if (style.display === 'none' || style.visibility === 'hidden') {
-      return false;
-    }
-  }
-
-  // Leave anything the user already filled alone.
-  const current = 'value' in field ? String((field as { value?: unknown }).value ?? '') : '';
-  return current.trim() === '';
-}
-
-/** Everything about a field that hints at what belongs in it. */
-function describes(field: Element): string {
-  const parts = [
-    field.getAttribute('name'),
-    field.getAttribute('id'),
-    field.getAttribute('placeholder'),
-    field.getAttribute('aria-label'),
-    field.getAttribute('type'),
-    field.closest('label')?.textContent,
-  ];
-
-  return parts
-    .filter((part): part is string => typeof part === 'string')
-    .join(' ')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
-function matches(field: Element, needle: string): boolean {
-  const haystack = ` ${describes(field)} `;
-  const wanted = needle.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  return wanted !== '' && haystack.includes(` ${wanted} `);
-}
-
-function applyValue(field: Element, value: string): boolean {
-  if (field instanceof HTMLSelectElement) {
-    const option = [...field.options].find((entry) => entry.value !== '');
-    if (option === undefined) {
-      return false;
-    }
-    field.value = option.value;
-    notify(field);
-    return true;
-  }
-
-  if (!(field instanceof HTMLInputElement) && !(field instanceof HTMLTextAreaElement)) {
-    return false;
-  }
-
-  // Through the prototype's setter, so a framework's own value tracking sees the change.
-  const prototype =
-    field instanceof HTMLInputElement
-      ? HTMLInputElement.prototype
-      : HTMLTextAreaElement.prototype;
-  const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-
-  if (setter === undefined) {
-    field.value = value;
-  } else {
-    setter.call(field, value);
-  }
-
-  notify(field);
-  return true;
-}
-
-function notify(field: Element): void {
-  field.dispatchEvent(new Event('input', { bubbles: true }));
-  field.dispatchEvent(new Event('change', { bubbles: true }));
-}
-
-/** What a control would submit, and whether anything is still blank. */
+/** What clicking a control would submit, and what of it is still blank. */
 export interface FormNeeds {
   readonly isSubmit: boolean;
   readonly fields: readonly string[];
@@ -220,22 +75,30 @@ function nameFor(field: Element): string {
   return label.replace(/\s+/g, ' ').trim().slice(0, 40);
 }
 
-/** Parses the panel's "search: shoes" lines into rules. */
-export function parseFieldRules(text: string): readonly FieldRule[] {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line !== '' && line.includes(':'))
-    .map((line) => {
-      const separator = line.indexOf(':');
-      return {
-        match: line.slice(0, separator).trim(),
-        value: line.slice(separator + 1).trim(),
-      };
-    })
-    .filter((rule) => rule.match !== '' && rule.value !== '');
-}
+const FILLABLE =
+  'input[type="text"], input[type="search"], input[type="email"], input[type="tel"], ' +
+  'input[type="number"], input[type="url"], input:not([type]), textarea, select';
 
-export function formatFieldRules(rules: readonly FieldRule[]): string {
-  return rules.map((rule) => `${rule.match}: ${rule.value}`).join('\n');
+/** Whether this field is one a person could still be expected to type into. */
+function isFillable(field: Element): boolean {
+  if (field.hasAttribute('disabled') || field.hasAttribute('readonly')) {
+    return false;
+  }
+  // A password field is never counted: the sweep must not invite anyone to sign into a real
+  // account as a side effect of clicking around.
+  if (field.getAttribute('type') === 'password') {
+    return false;
+  }
+
+  const view = field.ownerDocument.defaultView;
+  if (view !== null) {
+    const style = view.getComputedStyle(field);
+    if (style.display === 'none' || style.visibility === 'hidden') {
+      return false;
+    }
+  }
+
+  // Leave anything the user already filled alone.
+  const current = 'value' in field ? String((field as { value?: unknown }).value ?? '') : '';
+  return current.trim() === '';
 }

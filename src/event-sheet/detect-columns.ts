@@ -42,6 +42,7 @@ const ROLE_SYNONYMS: Readonly<Record<ColumnRole, readonly string[]>> = {
   required: ['is mandatory', 'is required', 'mandatory', 'required', 'req'],
   description: ['description', 'desc', 'definition', 'notes', 'note', 'comments', 'comment', 'remarks'],
   example: ['example value', 'sample value', 'example values', 'sample data', 'example', 'sample'],
+  source: ['source frontend api', 'event source', 'fired from', 'source', 'channel'],
 };
 
 /**
@@ -78,11 +79,16 @@ export function detectColumns(grid: SheetGrid): ColumnDetection {
 
   for (const role of COLUMN_ROLES) {
     const columns = candidates[role];
-    if (columns.length === 1) {
-      mapping[role] = columns[0];
-    } else if (columns.length > 1) {
-      contested.add(role);
+    if (columns.length === 0) {
+      continue;
     }
+
+    const outright = strongestColumn(headers, role, columns);
+    if (outright === undefined) {
+      contested.add(role);
+      continue;
+    }
+    mapping[role] = outright;
   }
 
   // One column claimed by two roles is just as ambiguous as one role claiming two columns —
@@ -175,6 +181,7 @@ function withOptionalRoles(
     required: selection.required,
     description: selection.description,
     example: selection.example,
+    source: selection.source,
   };
 }
 
@@ -260,6 +267,7 @@ function collectCandidates(headers: readonly string[]): ColumnCandidates {
     required: [],
     description: [],
     example: [],
+    source: [],
   };
 
   headers.forEach((header, column) => {
@@ -284,6 +292,36 @@ function collectCandidates(headers: readonly string[]): ColumnCandidates {
   return candidates;
 }
 
+/**
+ * The one column that outscores every other claimant of this role, if there is one.
+ *
+ * `collectCandidates` files a column under whichever role it scores highest *for that column*,
+ * which leaves a role holding every column that merely mentions its wording. A real sheet has
+ * `Payload Key` beside `Array Payload Key`, `Payload Description` and
+ * `Field Type (Contact Attribute / Payload)`: four claimants for `payloadName`, so detection gave
+ * up and sent the user to manual mapping — where pointing the role one column off produced a
+ * schema whose fields were named `string` and `array`, and every event failed with every field
+ * missing.
+ *
+ * An exact header match is not ambiguous just because weaker partial matches exist. Only a tie at
+ * the top is genuinely the user's call.
+ */
+function strongestColumn(
+  headers: readonly string[],
+  role: ColumnRole,
+  columns: readonly number[],
+): number | undefined {
+  const scored = columns.map((column) => ({
+    column,
+    score: scoreHeader(normalizeHeader(headers[column] ?? ''), role),
+  }));
+
+  const top = Math.max(...scored.map((entry) => entry.score));
+  const [leader, runnerUp] = scored.filter((entry) => entry.score === top);
+
+  return runnerUp === undefined ? leader?.column : undefined;
+}
+
 /** 3 = exact header, 2 = header begins or ends with the synonym, 1 = contains it. */
 function scoreHeader(normalized: string, role: ColumnRole): number {
   const synonyms = TYPE_ROLES.includes(role)
@@ -304,4 +342,23 @@ function scoreHeader(normalized: string, role: ColumnRole): number {
   }
 
   return best;
+}
+
+/**
+ * The starting selection for the manual mapping form: a role with exactly one candidate is
+ * already decided, a contested one is left for the user to choose.
+ */
+export function preselectColumns(
+  candidates: ColumnCandidates,
+): Partial<Record<ColumnRole, number>> {
+  const selection: Partial<Record<ColumnRole, number>> = {};
+
+  for (const role of COLUMN_ROLES) {
+    const [only, second] = candidates[role];
+    if (only !== undefined && second === undefined) {
+      selection[role] = only;
+    }
+  }
+
+  return selection;
 }

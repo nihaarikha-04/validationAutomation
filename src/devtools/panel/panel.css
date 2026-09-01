@@ -298,6 +298,7 @@ body {
 .verdict__row--type-mismatch td { color: #c0392b; }
 
 .verdict__row--unverifiable td,
+.verdict__row--renamed td,
 .verdict__row--extra td { color: #b26a00; }
 
 .verdict__required { color: #c0392b; }
@@ -503,15 +504,6 @@ body {
   word-break: break-all;
 }
 
-.sweep__fields {
-  align-self: stretch;
-  margin: 4px 0;
-}
-
-.sweep__fields summary {
-  cursor: pointer;
-}
-
 .sweep__needed {
   margin: 6px 0 10px;
   padding-left: 20px;
@@ -597,3 +589,18 @@ body {
   background: rgba(128, 128, 128, 0.1);
   font-size: 11px;
 }
+
+.sheet__columns {
+  margin: 6px 0 10px;
+  color: #555;
+}
+
+.sheet__revise {
+  margin-left: 4px;
+}
+
+.dashboard__total--api strong { color: #5b4bb7; }
+
+.runner__outcome--api-only { background: #ece9f8; color: #5b4bb7; }
+
+.runner__detail--warn { color: #b26a00; }

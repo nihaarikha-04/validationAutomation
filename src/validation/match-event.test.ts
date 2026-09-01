@@ -4,7 +4,7 @@ import { matchEvent } from './match-event';
 
 function sheetWith(...names: readonly string[]): EventSheet {
   const events = new Map<string, EventSchema>(
-    names.map((name) => [name, { name, fields: [] }]),
+    names.map((name) => [name, { name, fields: [], source: 'unknown' }]),
   );
   return { events, warnings: [] };
 }
@@ -126,5 +126,44 @@ describe('matchEvent', () => {
     const aliases = new Map([['Add to Cart', 'nope']]);
 
     expect(matchEvent('Add to Cart', sheetWith('add_to_cart'), aliases).kind).toBe('unknown');
+  });
+});
+
+describe('matchEvent, sheet names carrying a qualifier', () => {
+  it('prefers the event whose core name matches over a longer one that shares more words', () => {
+    // Regression, ethniq.com: `Product Viewed (Front End)` scored 0.67 against `product viewed`
+    // while `Product List Viewed` scored 0.80, so every PDP view was validated against the list
+    // schema and `Product Viewed (Front End)` reported NOT SEEN however often it fired.
+    const sheet = sheetWith('Product Viewed (Front End)', 'Product List Viewed');
+    const match = matchEvent('product viewed', sheet, new Map(), true);
+
+    expect(match.kind).toBe('close');
+    if (match.kind !== 'close') return;
+    expect(match.schema.name).toBe('Product Viewed (Front End)');
+  });
+
+  it('still reaches the longer name when the site actually fired it', () => {
+    const sheet = sheetWith('Product Viewed (Front End)', 'Product List Viewed');
+    const match = matchEvent('product list viewed', sheet, new Map(), true);
+
+    expect(match.kind).toBe('close');
+    if (match.kind !== 'close') return;
+    expect(match.schema.name).toBe('Product List Viewed');
+  });
+
+  it('keeps qualified names that differ in their core words apart', () => {
+    const sheet = sheetWith('Address Added (Profile)', 'Address Edited (Profile)');
+    const match = matchEvent('address_edited', sheet, new Map(), true);
+
+    expect(match.kind).toBe('close');
+    if (match.kind !== 'close') return;
+    expect(match.schema.name).toBe('Address Edited (Profile)');
+  });
+
+  it('does not invent a match the full name did not already support', () => {
+    // Stripping the qualifier may only ever raise an existing candidate's score, never admit a
+    // name that shares nothing with the event.
+    expect(matchEvent('newsletter subscribed', sheetWith('Product Viewed (Front End)'), new Map(), true).kind)
+      .toBe('unknown');
   });
 });

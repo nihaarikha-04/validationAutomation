@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { detectColumns } from '../../event-sheet/detect-columns';
+import { detectColumns, preselectColumns } from '../../event-sheet/detect-columns';
 import { EventSheetError } from '../../event-sheet/errors';
 import { normalizeSheet } from '../../event-sheet/normalize';
 import { parseCsv } from '../../event-sheet/parse-csv';
 import { readWorkbook } from '../../event-sheet/parse-xlsx';
 import type {
-  ColumnDetection,
   ColumnMapping,
+  ColumnRole,
   EventSheet,
   SheetGrid,
 } from '../../event-sheet/types';
@@ -38,18 +38,27 @@ import { SheetUpload } from './components/SheetUpload';
 /** Bounded so a long session on a chatty page cannot grow the panel's memory without limit. */
 const MAX_PAYLOADS = 500;
 
-type AmbiguousDetection = Extract<ColumnDetection, { kind: 'ambiguous' }>;
+/** Everything needed to re-map a sheet already read, so the choice can be revisited. */
+interface SheetSource {
+  readonly grid: SheetGrid;
+  readonly headers: readonly string[];
+  readonly headerRow: number;
+  readonly fileName: string;
+}
 
 type SheetState =
   | { readonly kind: 'empty' }
   | { readonly kind: 'failed'; readonly message: string }
-  | {
+  | (SheetSource & {
       readonly kind: 'mapping';
-      readonly grid: SheetGrid;
-      readonly detection: AmbiguousDetection;
-      readonly fileName: string;
-    }
-  | { readonly kind: 'ready'; readonly sheet: EventSheet; readonly fileName: string };
+      readonly selected: Readonly<Partial<Record<ColumnRole, number>>>;
+      readonly note: string;
+    })
+  | (SheetSource & {
+      readonly kind: 'ready';
+      readonly sheet: EventSheet;
+      readonly mapping: ColumnMapping;
+    });
 
 export interface AppProps {
   readonly evaluator: PageEvaluator;
@@ -136,14 +145,27 @@ export function App({
       const grid = await readGrid(file);
       const detection = detectColumns(grid);
 
+      const source = {
+        grid,
+        headers: detection.headers,
+        headerRow: detection.headerRow,
+        fileName: file.name,
+      };
+
       if (detection.kind === 'ambiguous') {
-        setSheetState({ kind: 'mapping', grid, detection, fileName: file.name });
+        setSheetState({
+          ...source,
+          kind: 'mapping',
+          selected: preselectColumns(detection.candidates),
+          note: `Could not resolve automatically: ${detection.missing.join(', ')}.`,
+        });
         return;
       }
 
       setSheetState({
+        ...source,
         kind: 'ready',
-        fileName: file.name,
+        mapping: detection.mapping,
         sheet: normalizeSheet(grid, detection.mapping, detection.headerRow),
       });
     } catch (error) {
@@ -158,14 +180,35 @@ export function App({
   }, []);
 
   const applyMapping = (mapping: ColumnMapping): void => {
-    if (sheetState.kind !== 'mapping') {
+    if (sheetState.kind === 'empty' || sheetState.kind === 'failed') {
       return;
     }
 
     setSheetState({
-      kind: 'ready',
+      grid: sheetState.grid,
+      headers: sheetState.headers,
+      headerRow: sheetState.headerRow,
       fileName: sheetState.fileName,
-      sheet: normalizeSheet(sheetState.grid, mapping, sheetState.detection.headerRow),
+      kind: 'ready',
+      mapping,
+      sheet: normalizeSheet(sheetState.grid, mapping, sheetState.headerRow),
+    });
+  };
+
+  /** Reopens the mapping form on the columns currently in use. */
+  const reviseMapping = (): void => {
+    if (sheetState.kind !== 'ready') {
+      return;
+    }
+
+    setSheetState({
+      grid: sheetState.grid,
+      headers: sheetState.headers,
+      headerRow: sheetState.headerRow,
+      fileName: sheetState.fileName,
+      kind: 'mapping',
+      selected: sheetState.mapping,
+      note: 'These are the columns in use. Change any that are wrong.',
     });
   };
 
@@ -183,14 +226,25 @@ export function App({
 
       {sheetState.kind === 'mapping' ? (
         <ColumnMappingForm
-          headers={sheetState.detection.headers}
-          candidates={sheetState.detection.candidates}
-          missing={sheetState.detection.missing}
+          headers={sheetState.headers}
+          selected={sheetState.selected}
+          note={sheetState.note}
           onSubmit={applyMapping}
         />
       ) : null}
 
-      {sheetState.kind === 'ready' ? <EventTree sheet={sheetState.sheet} /> : null}
+      {sheetState.kind === 'ready' ? (
+        <>
+          <p className="sheet__columns">
+            Reading <code>{columnLabel(sheetState, 'eventName')}</code> as the event and{' '}
+            <code>{columnLabel(sheetState, 'payloadName')}</code> as the payload key.{' '}
+            <button type="button" className="sheet__revise" onClick={reviseMapping}>
+              Change columns
+            </button>
+          </p>
+          <EventTree sheet={sheetState.sheet} />
+        </>
+      ) : null}
 
       <PageSweep
         driver={driver}
@@ -243,4 +297,18 @@ async function readGrid(file: File): Promise<SheetGrid> {
   }
 
   return first.grid;
+}
+
+/** The header text of the column a role is reading, for the line that states the mapping. */
+function columnLabel(
+  state: { readonly headers: readonly string[]; readonly mapping: ColumnMapping },
+  role: 'eventName' | 'payloadName',
+): string {
+  const column = state.mapping[role];
+  if (column === undefined) {
+    return 'nothing';
+  }
+
+  const header = state.headers[column] ?? '';
+  return header.trim() === '' ? `column ${column + 1}` : header;
 }

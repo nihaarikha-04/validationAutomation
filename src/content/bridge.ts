@@ -1,7 +1,7 @@
 import { detectAction, rank } from '../automation/detect-action';
 import { detectPlatform, findByPlatform } from '../automation/platforms/adapters';
 import { selectorFor } from '../automation/selector';
-import { fillFields, formNeeds } from '../automation/fill';
+import { formNeeds } from '../automation/fill';
 import { crossOriginFrames, findAcrossFrames, findClickables, pageStamp } from '../automation/sweep';
 import type { AutomationCommand, AutomationReply } from '../automation/commands';
 
@@ -111,10 +111,6 @@ chrome.runtime.onMessage.addListener(
         sendResponse({ kind: 'dismissed' });
         return false;
       }
-
-      case 'fill':
-        sendResponse({ kind: 'filled', count: fillFields(document, command.rules) });
-        return false;
 
       case 'form-needs': {
         const control = findAcrossFrames(document, command.selector);

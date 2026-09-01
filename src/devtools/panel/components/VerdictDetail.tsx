@@ -54,7 +54,15 @@ export function VerdictDetail({ verdict }: VerdictDetailProps) {
             </td>
             <td>{field.expectedType}</td>
             <td>{field.actualType}</td>
-            <td>{field.status}</td>
+            <td>
+              {field.status}
+              {field.foundAs === undefined ? null : (
+                <>
+                  {' as '}
+                  <code>{field.foundAs}</code>
+                </>
+              )}
+            </td>
           </tr>
         ))}
         {result.extra.map((path) => (

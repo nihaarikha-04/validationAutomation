@@ -821,6 +821,140 @@ superseded by D10).
 
 ---
 
+## Field Defects — ethniq.com, 2026-09-01
+
+Found in the first live session against a real client site, testing by hand (log in, browse the
+profile area) rather than by sweep. All three are fixed; none belong to a phase.
+
+- [x] **Run summary ignored everything not triggered by the sweep.** `PageSweep` built the report
+  from `outcome.captured`, i.e. `payloadsSince(runStart)`. A manual session reported "5 passed,
+  0 failed" while the payload stream held seven passing events and a **failing `banner`** fired
+  ~64s before the run started. The report now reads the whole stream; clearing the stream is what
+  scopes a run. Files: `src/devtools/panel/components/PageSweep.tsx`.
+- [x] **Capture stats were meaningless on any page with iframes.** The manifest injects with
+  `all_frames: true` and every frame reports every 2s, but `subscribeStats` forwarded each message
+  straight to `setStats` — so the panel showed whichever frame reported last. ethniq.com displayed
+  "Watched 0 console lines" while capture was working and 22 payloads were on screen. Stats are now
+  summed per frame, and the "nothing matched" explanation only draws on frames that matched
+  nothing. Files: `src/devtools/panel/chrome-payload-source.ts`.
+- [x] **`Product Viewed (Front End)` could never pass.** A sheet qualifier in parentheses diluted
+  the Dice score: `product viewed` scored 0.67 against it but 0.80 against `Product List Viewed`,
+  so PDP views were validated against the list schema and the correct event reported NOT SEEN
+  forever. `closest()` now also scores each sheet name with a trailing parenthetical removed.
+  Verified against all 84 names in the client sheet: fixes the mis-route, introduces no new one,
+  and stripping produces no name collisions. Files: `src/validation/match-event.ts`.
+
+- [x] **Column detection gave up on the client sheet, and the manual mapping it fell back to was
+  set one column off.** `collectCandidates` files a column under whichever role *that column*
+  scores highest for, so `payloadName` collected `Payload Key`, `Array Payload Key`,
+  `Payload Description` and `Field Type (Contact Attribute / Payload)` — four claimants, therefore
+  ambiguous, therefore the manual mapping form. Mapped to `Payload Data Type` instead of
+  `Payload Key`, every event's schema had fields named `string` and `array`; nothing in any payload
+  matched, and `validate.ts:102` (every expected field missing → FAIL) failed all eight events that
+  fired. Detection now resolves a role to the column that outscores every other claimant, deferring
+  only on a genuine tie at the top. The real sheet resolves to eventName=1, payloadName=6,
+  payloadType=8, attributeName=3, attributeType=4. Files: `src/event-sheet/detect-columns.ts`.
+
+**Verified:** `pnpm typecheck`, `pnpm test` (441 passing, 27 files), `pnpm build`. Each fix has a
+regression test; the report-scope test was confirmed to fail against the old scoping before being
+kept.
+
+## Validation Policy — set with the tester, 2026-09-01
+
+The verdict rules, as decided while testing ethniq.com live:
+
+| Observation | Verdict | Why |
+|---|---|---|
+| Payload carries keys the sheet does not describe | PASS | Analytics payloads always carry SDK and site-specific extras. Recorded as `extra`, never scored. |
+| Sheet's key absent, payload has an equivalent key (`product_id` / `prid`) | WARNING | The data arrived in the right shape. What is wrong is that the sheet and the implementation disagree on the name. |
+| Value is the wrong data type | FAIL | A data defect, and it outranks a naming one — a renamed key holding the wrong type fails. |
+| Mandatory key genuinely absent, no equivalent | FAIL | Unchanged. |
+| Optional key present but null or empty | WARNING | Unchanged. |
+
+- [x] Renamed fields no longer read as missing. `findRename` compares payload keys the way event
+  names are compared, over a Smartech abbreviation table (`prid` → product id, `prqt` → quantity)
+  because token overlap alone scores those at zero. A rename warns however mandatory the field is;
+  the key it consumed is no longer double-reported as an `extra`. An ancestor path is never taken
+  as a rename of the key inside it. New: `src/validation/match-field.ts`,
+  `src/validation/name-similarity.ts` (the tokenise/Dice pair, now shared with `match-event`).
+  Changed: `src/validation/validate.ts`, `src/validation/types.ts`, `VerdictDetail.tsx`.
+- [x] Removed the sweep's "Values to type into forms" box and the auto-fill behind it. Form values
+  differ per site, so a canned rule list was never going to fit one; the sweep already pauses and
+  hands the form over, which is what the tester wanted. `formNeeds` — the pause detector — stays.
+  Deleted: `fillFields`, `FieldRule`, `DEFAULT_FIELD_RULES`, `parseFieldRules`,
+  `formatFieldRules`, the `fill`/`filled` command pair, and their tests and CSS.
+
+**Verified:** `pnpm typecheck`, `pnpm test` (438 passing, 28 files), `pnpm build`.
+
+---
+
+- [x] **API-source events are no longer reported as "never fired".** The sheet's
+  `Source (Frontend / API)` column is now a mapped column role, carried onto `EventSchema` as
+  `source`, and an unseen `api` event reports **API ONLY** with "It's an API event — check the
+  Smartech panel" instead of NOT SEEN. They are excluded from `notTested` and from the new
+  `reachable` denominator, so the summary counts against what the browser could actually produce.
+  An API event that *does* turn up in the browser is still validated normally — the sheet can be
+  wrong about the source, and something that fired is real evidence. Verified end to end against
+  the client sheet: source column detected at index 12, 11 events classified `api`, totals
+  `reachable 73 / apiOnly 11` before any browsing. Files: `src/event-sheet/types.ts`,
+  `detect-columns.ts`, `normalize.ts`, `src/reports/types.ts`, `build.ts`, `Dashboard.tsx`,
+  `PageSweep.tsx`.
+- [x] The resolved column mapping is now stated on screen ("Reading `Event Name` as the event and
+  `Payload Key` as the payload key") with a **Change columns** button that reopens the mapping
+  form on the columns in use. Detection resolving is not a reason to hide its choice — the wrong
+  mapping is silent, and previously the form only ever appeared when detection gave up.
+
+**Verified:** `pnpm typecheck`, `pnpm test` (442 passing, 28 files), `pnpm build`.
+
+- [x] **Merged events are validated inside their parent's payload.** A sheet row saying
+  `\U0001F500 Merge into "Product Viewed" event \u2014 do not fire separately` means the child's fields
+  are expected *inside* the parent's payload, so that is where they are now checked \u2014 PASS / FAIL /
+  WARNING like any other event, with "checked inside `<parent>`" on the row. Previously all 23
+  reported NOT SEEN, which read 23 correct implementations as 23 gaps.
+  - The directive is read from *any* cell on the event's naming row, because sheets put it in
+    Status, Implementation Status or Notes. The quoted name is required \u2014 it is what bounds the
+    name \u2014 and a directive naming something that is not an event in this sheet is discarded, which
+    is the guard against reading a stray sentence as a merge.
+  - The parent is resolved with `matchEvent`'s close matching: the sheet writes `"Product Viewed"`
+    where the event is called `Product Viewed (Front End)`. 15 of the 23 need this, and it only
+    works because of the qualifier fix recorded above.
+  - The parent's other keys are stripped from the child's `extra` list \u2014 they belong to the parent
+    and its other merged children, not to this one.
+  - A merged event that fires on its own is flagged `firedSeparately` and still validated: the
+    sheet and the site disagree, but the payload it carried is real evidence.
+  - Verified against the real captured `page view front end` payload: `Page Idle Time` and
+    `Page Active Time` both PASS inside `Page View (Front End)`. That also settles an earlier
+    finding \u2014 the six keys reported as "not in sheet" on Page View were these two children's
+    fields, correctly implemented. The sheet is not stale after all; the tool could not see the
+    relationship.
+  Files: `src/event-sheet/types.ts`, `normalize.ts`, `src/reports/types.ts`, `build.ts`,
+  `PageSweep.tsx`.
+
+**Verified:** `pnpm typecheck`, `pnpm test` (450 passing, 28 files), `pnpm build`.
+
+- [x] **The sweep retired a whole kind of control after its first success.** `exhausted()` treated
+  a group as finished once any member produced an event \u2014 right for a product grid, wrong for the
+  controls coverage depends on. A row of profile tabs is one component, so clicking
+  `Order History` retired `My Subscriptions`, `My Cards` and `Recently Viewed` before they were
+  ever tried, and the tester was told to click them by hand. A group is now exhausted when it
+  stops producing *new* event names: `BARREN_TRIES = 2` fruitless clicks, with
+  `MAX_TRIES_PER_GROUP = 12` as a hard ceiling. A grid costs three clicks instead of one; a row of
+  five distinct tabs now gets all five. Files: `src/automation/crawl.ts`.
+
+**Verified:** `pnpm typecheck`, `pnpm test` (451 passing, 28 files), `pnpm build`.
+
+**Deferred:
+- `WhatsApp Opt-in` does not match a site-fired `whatsapp_opt_in` (0.571, below the 0.6 threshold):
+  the camelCase splitter reads `WhatsApp` as `whats app`. The event is 🚫 Blocked in the sheet, so
+  it cannot fire yet. Fixing it means touching the splitter, which is load-bearing for every other
+  name — not worth it until the event exists.
+- The report still cannot distinguish "unimplemented" from "this session never reached the flow".
+  Of the client sheet's 84 events, only 48 can fire in a browser at all — 23 are merged into a
+  parent, 11 are API-source, 2 are blocked — so "79 not tested" overstates the gap badly. The
+  summary should count against what is reachable, not against the raw sheet total.
+
+---
+
 ### Working note for whoever runs this in Claude Code
 
 Feed one phase at a time. After each phase: build it, run the tests, check for TypeScript and extension errors in `chrome://extensions`, verify the exit criteria manually, and only then move to the next phase. Don't let it generate multiple phases' worth of code in one pass.

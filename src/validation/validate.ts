@@ -1,5 +1,6 @@
 import type { DataType, EventSchema } from '../event-sheet/types';
 import { isSpecial, type TransferableValue } from '../shared/payload';
+import { findRename } from './match-field';
 import { canonicalPath, leafPaths, readPath, type PathLookup } from './path';
 import {
   DEFAULT_VALIDATION_OPTIONS,
@@ -28,18 +29,51 @@ export function validateEvent(
   options: ValidationOptions = DEFAULT_VALIDATION_OPTIONS,
 ): ValidationResult {
   const expected = schema.fields.filter((field) => field.payloadName !== '');
+  const expectedPaths = expected.map((field) => field.payloadName);
+
+  // Keys the payload carries that no expected field claims, which is where a renamed field hides.
+  const unclaimed = findExtraPaths(payload, expectedPaths);
 
   const fields: FieldResult[] = expected.map((field) => {
     const lookup = readPath(payload, field.payloadName);
-    const { status, actualType, value } = classify(lookup, field.payloadType);
+    const direct = classify(lookup, field.payloadType);
+
+    if (direct.status !== 'missing') {
+      return {
+        path: field.payloadName,
+        status: direct.status,
+        required: field.required,
+        expectedType: field.payloadType,
+        actualType: direct.actualType,
+        value: direct.value,
+      };
+    }
+
+    // The sheet's spelling is absent — before calling it missing, see whether the site sent the
+    // same field under a name the sheet did not predict. The value still has to be the right
+    // shape: a rename is a naming defect, a wrong type is a data defect, and the data defect wins.
+    const rename = findRename(field.payloadName, unclaimed);
+    if (rename === undefined) {
+      return {
+        path: field.payloadName,
+        status: 'missing',
+        required: field.required,
+        expectedType: field.payloadType,
+        actualType: direct.actualType,
+        value: direct.value,
+      };
+    }
+
+    const found = classify(readPath(payload, rename.foundAs), field.payloadType);
 
     return {
       path: field.payloadName,
-      status,
+      status: found.status === 'ok' ? 'renamed' : found.status,
       required: field.required,
       expectedType: field.payloadType,
-      actualType,
-      value,
+      actualType: found.actualType,
+      value: found.value,
+      foundAs: rename.foundAs,
     };
   });
 
@@ -54,7 +88,14 @@ export function validateEvent(
       actual: field.actualType,
     }));
 
-  const extra = findExtraPaths(payload, expected.map((field) => field.payloadName));
+  const renamed = fields
+    .filter((field) => field.foundAs !== undefined)
+    .map((field) => ({ path: field.path, foundAs: field.foundAs ?? '' }));
+
+  // A key consumed as a rename is not also an undocumented extra; reporting it twice would
+  // describe one disagreement as two separate findings.
+  const claimedByRename = new Set(renamed.map((field) => field.foundAs));
+  const extra = unclaimed.filter((path) => !claimedByRename.has(path));
 
   return {
     status: decideStatus(fields, typeMismatches, extra, options),
@@ -63,6 +104,7 @@ export function validateEvent(
     // even though the itemised result keeps the distinction visible.
     missing: [...pathsWithStatus('missing'), ...pathsWithStatus('undefined')],
     extra,
+    renamed,
     nullValues: pathsWithStatus('null'),
     emptyValues: pathsWithStatus('empty'),
     typeMismatches,
@@ -79,6 +121,11 @@ export function validateEvent(
  *
  * An absent *optional* field is normal and says nothing. An optional field that is present but
  * null or empty is suspicious rather than wrong, so it warns.
+ *
+ * A field found under another name warns however mandatory it was. The site sent the value and
+ * sent it in the right shape; what is wrong is that the sheet and the implementation disagree
+ * about the key. Failing that would report a data defect where only a naming one exists — and a
+ * wrong type under the renamed key is already a `type-mismatch`, which fails on the line below.
  */
 function decideStatus(
   fields: readonly FieldResult[],
@@ -87,7 +134,11 @@ function decideStatus(
   options: ValidationOptions,
 ): ValidationStatus {
   const requiredFailure = fields.some(
-    (field) => field.required && field.status !== 'ok' && field.status !== 'unverifiable',
+    (field) =>
+      field.required &&
+      field.status !== 'ok' &&
+      field.status !== 'unverifiable' &&
+      field.status !== 'renamed',
   );
 
   if (requiredFailure || typeMismatches.length > 0) {
@@ -110,9 +161,10 @@ function decideStatus(
     (field) => !field.required && (field.status === 'null' || field.status === 'empty'),
   );
   const unverifiable = fields.some((field) => field.status === 'unverifiable');
+  const renamed = fields.some((field) => field.status === 'renamed');
   const extraWarning = options.extraFields === 'warn' && extra.length > 0;
 
-  return blankOptional || unverifiable || extraWarning ? 'WARNING' : 'PASS';
+  return blankOptional || unverifiable || renamed || extraWarning ? 'WARNING' : 'PASS';
 }
 
 function classify(

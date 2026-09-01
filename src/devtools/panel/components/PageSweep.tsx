@@ -9,11 +9,6 @@ import {
   type Observation,
   type PageResult,
 } from '../../../automation/crawl';
-import {
-  DEFAULT_FIELD_RULES,
-  formatFieldRules,
-  parseFieldRules,
-} from '../../../automation/fill';
 import type { ClickRisk } from '../../../automation/sweep';
 import type { EventSheet } from '../../../event-sheet/types';
 import type { CapturedPayload } from '../../../shared/payload';
@@ -83,7 +78,6 @@ export function PageSweep({
   /** Hover and dwell alongside clicking, for the events no click can produce. */
   const [observe, setObserve] = useState(true);
   const [autoResume, setAutoResume] = useState(true);
-  const [fieldText, setFieldText] = useState(() => formatFieldRules(DEFAULT_FIELD_RULES));
   /** Set while the sweep is waiting for a form to be filled in by hand. */
   const [waiting, setWaiting] = useState<
     { request: InputRequest; decide: (decision: InputDecision) => void } | undefined
@@ -154,7 +148,6 @@ export function PageSweep({
       payloadsSince: (from: number) => latest.current.filter((payload) => payload.at >= from),
       onProgress: (message: string) => setProgress(message),
       allowed,
-      fieldRules: parseFieldRules(fieldText),
       onNeedsInput: (request: InputRequest) =>
         new Promise<InputDecision>((resolve) => {
           const pausedAt = now();
@@ -182,13 +175,13 @@ export function PageSweep({
         setPages(outcome.pages);
         setObservations(outcome.pages.flatMap((page) => page.observations));
         setSkipped(outcome.pages.reduce((total, page) => total + page.skippedAsRepeats, 0));
-        record(outcome.captured);
+        record();
         setProblem(outcome.stopped ?? outcome.pages.find((page) => page.stopped)?.stopped);
       } else {
         const outcome = await sweepPage(shared);
         setObservations(outcome.observations);
         setSkipped(outcome.skippedAsRepeats);
-        record(outcome.captured);
+        record();
         setProblem(outcome.stopped);
       }
     } catch (error) {
@@ -202,12 +195,17 @@ export function PageSweep({
   /**
    * Deciding verdicts is not a component's job — the whole report is built by `buildReport`,
    * which is pure and is what the exports and (later) stored history read from too.
+   *
+   * It reports on everything captured this session, not only what the sweep itself triggered.
+   * Scoping it to the sweep's own window silently dropped every event produced by hand: a run
+   * summarised as "5 passed, 0 failed" while the stream held seven passes and a failing `banner`
+   * fired a minute before the sweep started. Clearing the stream is what starts a fresh window.
    */
-  const record = (captured: readonly CapturedPayload[]): void => {
+  const record = (): void => {
     if (sheet === undefined) {
       return;
     }
-    setReport(buildReport(sheet, captured, { site, sheetName, sdkReady, at: now() }));
+    setReport(buildReport(sheet, latest.current, { site, sheetName, sdkReady, at: now() }));
   };
 
   sweepRef.current = sweep;
@@ -324,23 +322,6 @@ export function PageSweep({
           </select>
         </label>
 
-        <details className="sweep__fields">
-          <summary>Values to type into forms</summary>
-          <p className="paste__hint">
-            One rule per line, <code>field: value</code>. A field is matched on its name,
-            placeholder or label. Empty search boxes and login forms produce no events, so these
-            are what make those events reachable. Passwords are never filled.
-          </p>
-          <textarea
-            className="paste__input"
-            rows={6}
-            value={fieldText}
-            spellCheck={false}
-            disabled={running}
-            onChange={(event) => setFieldText(event.target.value)}
-          />
-        </details>
-
         <button type="button" disabled={running} onClick={() => void sweep()}>
           {crawl ? 'Crawl the site' : 'Sweep page'}
         </button>
@@ -416,8 +397,31 @@ export function PageSweep({
                           : ' — same words, different formatting'}
                       </span>
                     )}
+                    {entry.checkedIn === undefined ? null : (
+                      <span className="runner__detail">
+                        checked inside <code>{entry.checkedIn}</code>
+                      </span>
+                    )}
+                    {entry.firedSeparately ? (
+                      <span className="runner__detail runner__detail--warn">
+                        fired on its own, though the sheet says it must not
+                      </span>
+                    ) : null}
                   </summary>
-                  {entry.result === undefined ? (
+                  {entry.checkedIn !== undefined ? (
+                    <p className="runner__note">
+                      The sheet merges this event into <code>{entry.checkedIn}</code>, so it never
+                      fires under its own name. Its fields were checked inside that event’s
+                      payload instead.
+                    </p>
+                  ) : null}
+                  {entry.status === 'API ONLY' ? (
+                    <p className="runner__note">
+                      It’s an API event — check the Smartech panel. The sheet’s Source
+                      (Frontend / API) column says this one is fired from a server, so it never
+                      reaches the browser and nothing done on the site can produce it here.
+                    </p>
+                  ) : entry.result === undefined ? (
                     <p className="runner__note">
                       No click on this page produced this event. It may need input first, or live
                       on another page.

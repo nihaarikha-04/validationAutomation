@@ -23,7 +23,7 @@ function field(payloadName: string, required: boolean): FieldSchema {
 
 const SHEET: EventSheet = {
   events: new Map<string, EventSchema>([
-    ['add_to_cart', { name: 'add_to_cart', fields: [field('product_id', true)] }],
+    ['add_to_cart', { name: 'add_to_cart', fields: [field('product_id', true)], source: 'unknown' }],
   ]),
   warnings: [],
 };
@@ -170,9 +170,9 @@ describe('TestRunner', () => {
   it('runs every automatable event from the sheet without being told which', async () => {
     const multi: EventSheet = {
       events: new Map<string, EventSchema>([
-        ['add_to_cart', { name: 'add_to_cart', fields: [field('product_id', true)] }],
-        ['purchase', { name: 'purchase', fields: [field('order_id', true)] }],
-        ['page_viewed', { name: 'page_viewed', fields: [] }],
+        ['add_to_cart', { name: 'add_to_cart', fields: [field('product_id', true)], source: 'unknown' }],
+        ['purchase', { name: 'purchase', fields: [field('order_id', true)], source: 'unknown' }],
+        ['page_viewed', { name: 'page_viewed', fields: [], source: 'unknown' }],
       ]),
       warnings: [],
     };
@@ -296,8 +296,8 @@ describe('TestRunner', () => {
   it('does not let one ambiguous element stall the rest of the batch', async () => {
     const multi: EventSheet = {
       events: new Map<string, EventSchema>([
-        ['add_to_cart', { name: 'add_to_cart', fields: [field('product_id', true)] }],
-        ['newsletter_signup', { name: 'newsletter_signup', fields: [] }],
+        ['add_to_cart', { name: 'add_to_cart', fields: [field('product_id', true)], source: 'unknown' }],
+        ['newsletter_signup', { name: 'newsletter_signup', fields: [], source: 'unknown' }],
       ]),
       warnings: [],
     };

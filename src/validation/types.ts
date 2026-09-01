@@ -18,6 +18,12 @@ export type FieldStatus =
   | 'empty'
   | 'type-mismatch'
   /**
+   * The sheet's key is absent, but the payload carries the value under a key that plainly means
+   * the same thing — `prid` for `product_id`. The data arrived; the two sides disagree about what
+   * to call it. A naming disagreement, not a missing field.
+   */
+  | 'renamed'
+  /**
    * The captured value is a placeholder left by our own serialiser — a cycle, or something
    * clipped by the depth and breadth bounds. The site may be perfectly correct here; we simply
    * cannot tell. Reporting it as a mismatch would manufacture a defect that does not exist, so
@@ -39,6 +45,8 @@ export interface FieldResult {
   readonly expectedType: DataType;
   readonly actualType: string;
   readonly value: TransferableValue | undefined;
+  /** Set only for `renamed`: the payload key the value was actually found under. */
+  readonly foundAs?: string;
 }
 
 /** What to do about payload fields the Event Sheet does not describe. */
@@ -62,6 +70,8 @@ export interface ValidationResult {
   readonly missing: readonly string[];
   /** Payload paths the Event Sheet does not describe. */
   readonly extra: readonly string[];
+  /** Expected keys the payload spelled differently, and what it spelled them as. */
+  readonly renamed: readonly { readonly path: string; readonly foundAs: string }[];
   readonly nullValues: readonly string[];
   readonly emptyValues: readonly string[];
   readonly typeMismatches: readonly TypeMismatch[];

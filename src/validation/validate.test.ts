@@ -23,7 +23,7 @@ function field(
 }
 
 function schema(...fields: readonly FieldSchema[]): EventSchema {
-  return { name: 'add_to_cart', fields };
+  return { name: 'add_to_cart', fields, source: 'unknown' };
 }
 
 const CART = schema(
@@ -310,5 +310,51 @@ describe('a payload with none of the expected fields', () => {
   /** An event the sheet describes no fields for has nothing to be absent. */
   it('does not fail an event the sheet gives no fields', () => {
     expect(validateEvent({ anything: 1 }, schema(), AT).status).toBe('PASS');
+  });
+});
+
+describe('validateEvent, a field the site named differently', () => {
+  const schema: EventSchema = {
+    name: 'Add to Cart',
+    source: 'unknown',
+    fields: [
+      { payloadName: 'product_id', payloadType: 'string', attributeName: '', attributeType: 'unknown', required: true, description: '', example: '' },
+      { payloadName: 'quantity', payloadType: 'number', attributeName: '', attributeType: 'unknown', required: true, description: '', example: '' },
+    ],
+  };
+
+  it('warns rather than fails when a mandatory field arrived under another name', () => {
+    // The data is there and correctly shaped; the sheet and the implementation disagree about
+    // what to call it. Failing that reports a data defect where only a naming one exists.
+    const result = validateEvent({ prid: 'SKU-1', prqt: 2 }, schema, AT);
+
+    expect(result.status).toBe('WARNING');
+    expect(result.missing).toEqual([]);
+    expect(result.renamed).toEqual([
+      { path: 'product_id', foundAs: 'prid' },
+      { path: 'quantity', foundAs: 'prqt' },
+    ]);
+  });
+
+  it('does not also report the renamed key as an undocumented extra', () => {
+    expect(validateEvent({ prid: 'SKU-1', prqt: 2 }, schema, AT).extra).toEqual([]);
+  });
+
+  it('fails when the renamed field carries the wrong type', () => {
+    // A wrong type is a data defect and outranks the naming one.
+    const result = validateEvent({ prid: 'SKU-1', prqt: 'two' }, schema, AT);
+
+    expect(result.status).toBe('FAIL');
+    expect(result.typeMismatches).toEqual([
+      { path: 'quantity', expected: 'number', actual: 'string' },
+    ]);
+  });
+
+  it('still fails a mandatory field that is genuinely absent', () => {
+    expect(validateEvent({ prid: 'SKU-1' }, schema, AT).status).toBe('FAIL');
+  });
+
+  it('passes untouched when the site used the sheet’s own names', () => {
+    expect(validateEvent({ product_id: 'SKU-1', quantity: 2 }, schema, AT).status).toBe('PASS');
   });
 });

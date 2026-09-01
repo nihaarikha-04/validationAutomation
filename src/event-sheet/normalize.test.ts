@@ -204,3 +204,31 @@ describe('toRequired', () => {
     expect(toRequired('maybe')).toBeUndefined();
   });
 });
+
+describe('normalizeSheet, merge directives', () => {
+  const MAP: ColumnMapping = { eventName: 0, description: 1, payloadName: 2, payloadType: 3 };
+  const HEAD = ['Event Name', 'Status', 'Payload Key', 'Payload Data Type'];
+
+  it('reads the parent out of a merge directive in any column', () => {
+    const grid: SheetGrid = [
+      HEAD,
+      ['PDP Zoom Clicked', '\u{1F500} Merge into "Product Viewed" event \u2014 do not fire separately', 'image_index', 'int'],
+    ];
+
+    expect(normalizeSheet(grid, MAP, 0).events.get('PDP Zoom Clicked')?.mergeInto)
+      .toBe('Product Viewed');
+  });
+
+  it('leaves an ordinary event unmerged', () => {
+    const grid: SheetGrid = [HEAD, ['Add to Cart', 'Live in code', 'product_id', 'string']];
+
+    expect(normalizeSheet(grid, MAP, 0).events.get('Add to Cart')?.mergeInto).toBeUndefined();
+  });
+
+  it('ignores a merge phrase with no quoted name to bound it', () => {
+    // Without quotes there is no end to the name, and guessing one invents a parent.
+    const grid: SheetGrid = [HEAD, ['Foo', 'merge into whatever comes next', 'product_id', 'string']];
+
+    expect(normalizeSheet(grid, MAP, 0).events.get('Foo')?.mergeInto).toBeUndefined();
+  });
+});

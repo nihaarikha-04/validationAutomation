@@ -169,3 +169,36 @@ describe('buildMapping', () => {
     expect(result).toEqual({ kind: 'incomplete', missing: ['eventName'] });
   });
 });
+
+describe('detectColumns, a role with several partial claimants', () => {
+  /** The real ethniq.com sheet's header row, which detection used to give up on. */
+  const ETHNIQ = [
+    '', 'Event Name', 'Status', 'Attribute', 'Attribute Data Type', 'Attribute Description',
+    'Payload Key', 'Array Payload Key', 'Payload Data Type', 'Array Element Type',
+    'Payload Description', 'Notes', 'Source (Frontend / API)', 'Netcore web scripts',
+    'Netcore web comments', 'Field Type (Contact Attribute / Payload)', 'Implementation Status',
+    'Netcore web logs',
+  ];
+
+  it('gives the role to the exact header match over weaker partial ones', () => {
+    // `payloadName` was claimed by `Payload Key`, `Array Payload Key`, `Payload Description` and
+    // `Field Type (Contact Attribute / Payload)`. Detection returned ambiguous, the user mapped
+    // the role one column off, and every event validated against fields named `string`/`array`.
+    const detection = detectColumns([ETHNIQ, ['', 'Login', '', 'Mobile', 'TEXT', '', 'mobile_number', '', 'string', '', '', '']]);
+
+    expect(detection.kind).toBe('resolved');
+    if (detection.kind !== 'resolved') return;
+    expect(detection.mapping.payloadName).toBe(6);
+    expect(detection.mapping.payloadType).toBe(8);
+    expect(detection.mapping.attributeName).toBe(3);
+    expect(detection.mapping.attributeType).toBe(4);
+  });
+
+  it('still defers to the user when two columns tie at the top score', () => {
+    const detection = detectColumns([['Event Name', 'Payload Key', 'Payload Field']]);
+
+    expect(detection.kind).toBe('ambiguous');
+    if (detection.kind !== 'ambiguous') return;
+    expect(detection.missing).toContain('payloadName');
+  });
+});

@@ -20,7 +20,7 @@ function field(payloadName: string, required: boolean): FieldSchema {
 
 const SHEET: EventSheet = {
   events: new Map<string, EventSchema>([
-    ['add_to_cart', { name: 'add_to_cart', fields: [field('product_id', true)] }],
+    ['add_to_cart', { name: 'add_to_cart', fields: [field('product_id', true)], source: 'unknown' }],
   ]),
   warnings: [],
 };

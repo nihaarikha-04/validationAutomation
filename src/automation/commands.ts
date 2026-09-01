@@ -1,4 +1,3 @@
-import type { FieldRule } from './fill';
 import type { Clickable } from './sweep';
 import type { ActionCandidate, ActionTarget } from './types';
 
@@ -26,7 +25,6 @@ export type AutomationCommand =
   | { readonly kind: 'same-tab'; readonly on: boolean }
   /** Asks every frame to report itself, so the panel learns which frames exist. */
   | { readonly kind: 'announce' }
-  | { readonly kind: 'fill'; readonly rules: readonly FieldRule[] }
   | { readonly kind: 'form-needs'; readonly selector: string }
   | { readonly kind: 'location' }
   | { readonly kind: 'navigate'; readonly url: string };
@@ -43,7 +41,6 @@ export type AutomationReply =
   | { readonly kind: 'dismissed' }
   | { readonly kind: 'scrolled' }
   | { readonly kind: 'hovered' }
-  | { readonly kind: 'filled'; readonly count: number }
   | {
       readonly kind: 'form-needs';
       readonly isSubmit: boolean;

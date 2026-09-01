@@ -26,8 +26,8 @@ function field(payloadName: string, required: boolean): FieldSchema {
 
 const SHEET: EventSheet = {
   events: new Map<string, EventSchema>([
-    ['add_to_cart', { name: 'add_to_cart', fields: [field('product_id', true)] }],
-    ['never_fires', { name: 'never_fires', fields: [] }],
+    ['add_to_cart', { name: 'add_to_cart', fields: [field('product_id', true)], source: 'unknown' }],
+    ['never_fires', { name: 'never_fires', fields: [], source: 'unknown' }],
   ]),
   warnings: [],
 };
@@ -104,10 +104,32 @@ describe('PageSweep', () => {
     expect(await screen.findByText('NOT SEEN')).toBeInTheDocument();
   });
 
+  it('reports on events captured before the sweep began', async () => {
+    // Regression, ethniq.com: the report was built only from what the sweep itself triggered, so
+    // a tester who logged in and clicked through by hand got "5 passed, 0 failed" while the
+    // stream held seven passes and a failing event fired a minute earlier.
+    const earlier: CapturedPayload = { ...payload('add_to_cart'), at: NOW - 60_000 };
+
+    render(
+      <PageSweep
+        driver={driverWith(() => undefined)}
+        sheet={SHEET}
+        payloads={[earlier]}
+        now={() => NOW}
+        navigation={quietNavigation} site="shop.test" sheetName="sheet.csv" sdkReady onExport={() => undefined}
+        settleMs={0}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sweep page' }));
+
+    expect(await screen.findByText('PASS')).toBeInTheDocument();
+  });
+
   it('credits a sheet event fired under a differently formatted name', async () => {
     const sheet: EventSheet = {
       events: new Map<string, EventSchema>([
-        ['Add to Cart', { name: 'Add to Cart', fields: [field('product_id', true)] }],
+        ['Add to Cart', { name: 'Add to Cart', fields: [field('product_id', true)], source: 'unknown' }],
       ]),
       warnings: [],
     };
@@ -133,7 +155,7 @@ describe('PageSweep', () => {
   it('credits a sheet event fired under a synonymous name', async () => {
     const sheet: EventSheet = {
       events: new Map<string, EventSchema>([
-        ['Sign in', { name: 'Sign in', fields: [field('product_id', true)] }],
+        ['Sign in', { name: 'Sign in', fields: [field('product_id', true)], source: 'unknown' }],
       ]),
       warnings: [],
     };

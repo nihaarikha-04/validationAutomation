@@ -1,6 +1,5 @@
 import type { AutomationReply, KnownFrame, PageDriver } from './commands';
 import type { CapturedPayload } from '../shared/payload';
-import type { FieldRule } from './fill';
 import type { Clickable, ClickRisk } from './sweep';
 
 /** A control plus the frame it lives in, so the click goes back to the right document. */
@@ -16,7 +15,16 @@ const GIVE_UP_AFTER = 3;
  *
  * A grid of forty product tiles that fire nothing should cost three clicks, not forty.
  */
-const TRIES_PER_GROUP = 3;
+/** Fruitless clicks on one kind of control before moving on. */
+const BARREN_TRIES = 2;
+
+/**
+ * A hard ceiling per kind of control, however much it keeps producing.
+ *
+ * Only a pathological page reaches it — the run's click budget and time limit bound a sweep long
+ * before this does — but a list of two hundred distinct controls should not eat an entire run.
+ */
+const MAX_TRIES_PER_GROUP = 12;
 
 /** How long to wait for a content script to come back after a navigation. */
 const PAGE_READY_TIMEOUT_MS = 15_000;
@@ -63,7 +71,6 @@ export interface SweepDeps {
    * A search box left empty produces no search event and a login form no sign-in, so those events
    * are unreachable by clicking alone however thorough the sweep is.
    */
-  readonly fieldRules: readonly FieldRule[];
   /**
    * Called when a control would submit a form with empty fields.
    *
@@ -119,8 +126,10 @@ export async function sweepPage(
   const observations: Observation[] = [];
   const captured: CapturedPayload[] = [];
   const visited = new Set<string>();
-  /** Events each kind of control has already produced. */
-  const produced = new Map<string, number>();
+  /** The distinct events each kind of control has produced so far. */
+  const produced = new Map<string, Set<string>>();
+  /** Consecutive clicks on a kind of control that produced nothing we had not already seen. */
+  const barren = new Map<string, number>();
   /** Clicks already spent on each kind of control. */
   const tried = new Map<string, number>();
   let unreachable = 0;
@@ -132,9 +141,18 @@ export async function sweepPage(
   /** Whether the last thing we did was close an overlay, so we do not loop closing nothing. */
   let justDismissed = false;
 
-  // Once one product tile has fired product_view, the other thirty-nine tell us nothing new.
+  /**
+   * Whether another control of this kind is still worth clicking.
+   *
+   * Stopping at the first success — which this used to do — assumes every control of a kind does
+   * the same thing. True of a product grid, where tile two fires the same `product_viewed` as
+   * tile one. False of the controls coverage actually depends on: a row of profile tabs is one
+   * component, so clicking `Order History` retired `My Subscriptions`, `My Cards` and
+   * `Recently Viewed` before they were ever tried. What exhausts a group is running out of *new*
+   * events, not producing one.
+   */
   const exhausted = (group: string): boolean =>
-    (produced.get(group) ?? 0) > 0 || (tried.get(group) ?? 0) >= TRIES_PER_GROUP;
+    (barren.get(group) ?? 0) >= BARREN_TRIES || (tried.get(group) ?? 0) >= MAX_TRIES_PER_GROUP;
 
   // Where we began, so a click that navigates can be noticed.
   const opened = await deps.driver.send({ kind: 'location' });
@@ -148,11 +166,6 @@ export async function sweepPage(
   // Load whatever appears on scroll before taking stock of the page, resting at each step so
   // anything that fires on becoming visible gets the chance to.
   await deps.driver.send({ kind: 'scroll', dwellMs: deps.dwellMs });
-
-  // Fill anything that wants a value, so submit buttons have something to submit.
-  if (deps.fieldRules.length > 0) {
-    await fillEveryFrame(deps);
-  }
 
   for (let round = 0; round < budget; round += 1) {
     if (deps.isCancelled()) {
@@ -291,9 +304,19 @@ export async function sweepPage(
     await delay(deps.settleMs);
     const fired = deps.payloadsSince(from);
     captured.push(...fired);
-    if (fired.length > 0) {
-      produced.set(next.group, (produced.get(next.group) ?? 0) + fired.length);
+    const seenForGroup = produced.get(next.group) ?? new Set<string>();
+    const novel = fired.filter((payload) => {
+      const name = payload.eventName;
+      return name !== undefined && !seenForGroup.has(name);
+    });
+    for (const payload of novel) {
+      if (payload.eventName !== undefined) {
+        seenForGroup.add(payload.eventName);
+      }
     }
+    produced.set(next.group, seenForGroup);
+    // A click that turns up something new earns this kind of control another go.
+    barren.set(next.group, novel.length > 0 ? 0 : (barren.get(next.group) ?? 0) + 1);
     observations.push({
       label: next.label,
       eventNames: [...new Set(fired.map(describeEvent))],
@@ -554,17 +577,6 @@ async function askFormNeeds(
       : await deps.driver.sendTo(control.frameId, command);
 
   return reply.kind === 'form-needs' ? reply : undefined;
-}
-
-/** Fields can live in frames too, so every frame is asked. */
-async function fillEveryFrame(deps: SweepDeps): Promise<void> {
-  const command = { kind: 'fill' as const, rules: deps.fieldRules };
-
-  if (deps.driver.sendAll === undefined) {
-    await deps.driver.send(command);
-    return;
-  }
-  await deps.driver.sendAll(command);
 }
 
 /** Ids are per-document, so a frame's number is part of a control's identity. */

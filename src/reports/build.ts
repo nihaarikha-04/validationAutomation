@@ -1,4 +1,4 @@
-import type { EventSheet } from '../event-sheet/types';
+import type { EventSchema, EventSheet } from '../event-sheet/types';
 import type { CapturedPayload } from '../shared/payload';
 import { payloadSubject } from '../validation/from-capture';
 import { matchEvent } from '../validation/match-event';
@@ -34,14 +34,9 @@ export function buildReport(
   const hits = firstHitPerEvent(sheet, captured);
   const events = [...sheet.events.values()].map((schema): EventOutcome => {
     const hit = hits.matched.get(schema.name);
+
     if (hit === undefined) {
-      return {
-        eventName: schema.name,
-        status: 'NOT SEEN',
-        firedAs: undefined,
-        matchReason: undefined,
-        result: undefined,
-      };
+      return unfired(schema, sheet, hits, options);
     }
 
     const subject = payloadSubject(hit.payload);
@@ -57,6 +52,9 @@ export function buildReport(
       status: result === undefined ? 'NOT SEEN' : result.status === 'FAIL' ? 'FAIL' : 'PASS',
       firedAs: hit.observed === schema.name ? undefined : hit.observed,
       matchReason: hit.reason,
+      checkedIn: undefined,
+      // The sheet told this one not to fire on its own, and here it is.
+      firedSeparately: schema.mergeInto !== undefined,
       result,
     };
   });
@@ -71,6 +69,67 @@ export function buildReport(
     undocumented: [...new Set(hits.unmatched)],
     channel: 'debug-payload',
   };
+}
+
+/**
+ * What to report for a sheet event no payload matched.
+ *
+ * An event the sheet merged into another was never going to appear under its own name — that is
+ * the whole point of merging it. Its fields are expected inside the parent's payload, so that is
+ * where they are checked, and it gets a real verdict instead of the NOT SEEN that made 23 correct
+ * implementations look like 23 gaps.
+ */
+function unfired(
+  schema: EventSchema,
+  sheet: EventSheet,
+  hits: Hits,
+  options: ValidationOptions,
+): EventOutcome {
+  const base = {
+    eventName: schema.name,
+    firedAs: undefined,
+    matchReason: undefined,
+    firedSeparately: false,
+  } as const;
+
+  const parent = parentOf(schema, sheet);
+  const parentHit = parent === undefined ? undefined : hits.matched.get(parent.name);
+  const parentSubject = parentHit === undefined ? undefined : payloadSubject(parentHit.payload);
+
+  if (parent !== undefined && parentHit !== undefined && parentSubject !== undefined) {
+    const result = validateEvent(parentSubject, schema, parentHit.payload.at, options);
+
+    return {
+      ...base,
+      status: result.status === 'FAIL' ? 'FAIL' : 'PASS',
+      checkedIn: parent.name,
+      // Everything else in the parent's payload belongs to the parent and to its other merged
+      // children. Listing it against this one would report the whole event as undocumented here.
+      result: { ...result, extra: [] },
+    };
+  }
+
+  return {
+    ...base,
+    // A server-fired event was never going to appear here, so saying it "never fired" would be
+    // reporting the tool's blind spot as the site's defect.
+    status: schema.source === 'api' ? 'API ONLY' : 'NOT SEEN',
+    checkedIn: undefined,
+    result: undefined,
+  };
+}
+
+/** The event a merged one was folded into, reconciling the sheet's two spellings of its name. */
+function parentOf(schema: EventSchema, sheet: EventSheet): EventSchema | undefined {
+  if (schema.mergeInto === undefined) {
+    return undefined;
+  }
+
+  const match = matchEvent(schema.mergeInto, sheet, new Map(), true);
+  if (match.kind === 'unknown' || match.schema.name === schema.name) {
+    return undefined;
+  }
+  return match.schema;
 }
 
 interface Hit {
@@ -122,15 +181,21 @@ function firstHitPerEvent(sheet: EventSheet, captured: readonly CapturedPayload[
 }
 
 function tally(events: readonly EventOutcome[]): RunTotals {
-  const passed = events.filter((event) => event.status === 'PASS').length;
-  const failed = events.filter((event) => event.status === 'FAIL').length;
+  const countOf = (status: EventOutcome['status']): number =>
+    events.filter((event) => event.status === status).length;
+
+  const passed = countOf('PASS');
+  const failed = countOf('FAIL');
+  const apiOnly = countOf('API ONLY');
 
   return {
     events: events.length,
     tested: passed + failed,
     passed,
     failed,
-    notTested: events.length - passed - failed,
+    notTested: events.length - passed - failed - apiOnly,
+    apiOnly,
+    reachable: events.length - apiOnly,
   };
 }
 

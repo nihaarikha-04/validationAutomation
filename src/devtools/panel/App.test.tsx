@@ -263,3 +263,23 @@ describe('App', () => {
     expect(screen.getByText('0 payloads')).toBeInTheDocument();
   });
 });
+
+describe('App, the column mapping in use', () => {
+  it('states which columns a resolved sheet is reading, and reopens them on request', async () => {
+    // Detection resolving is not a reason to hide its choice: mapping a role one column off
+    // silently builds a schema of the wrong field names, and nothing else on screen reveals it.
+    renderApp();
+
+    const csv = 'Event Name,Payload Key,Payload Data Type\nLogin,mobile_number,string\n';
+    fireEvent.change(screen.getByLabelText('Event Sheet'), {
+      target: { files: [new File([csv], 'sheet.csv', { type: 'text/csv' })] },
+    });
+
+    expect(await screen.findByText(/Reading/)).toHaveTextContent('Payload Key');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Change columns' }));
+
+    expect(await screen.findByText('Confirm the columns')).toBeInTheDocument();
+    expect(screen.getByText(/These are the columns in use/)).toBeInTheDocument();
+  });
+});

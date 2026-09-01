@@ -4,7 +4,7 @@ import { intentForEvent, planFromSheet, runnable } from './event-plan';
 
 function sheetWith(...names: readonly string[]): EventSheet {
   return {
-    events: new Map<string, EventSchema>(names.map((name) => [name, { name, fields: [] }])),
+    events: new Map<string, EventSchema>(names.map((name) => [name, { name, fields: [], source: 'unknown' }])),
     warnings: [],
   };
 }

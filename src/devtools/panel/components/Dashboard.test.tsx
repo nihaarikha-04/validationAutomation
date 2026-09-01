@@ -8,7 +8,7 @@ const REPORT: RunReport = {
   sheetName: 'events.xlsx',
   sdkReady: true,
   at: 1_735_689_600_000,
-  totals: { events: 3, tested: 2, passed: 1, failed: 1, notTested: 1 },
+  totals: { events: 3, tested: 2, passed: 1, failed: 1, notTested: 1, apiOnly: 0, reachable: 3 },
   events: [],
   undocumented: [],
   channel: 'debug-payload',
@@ -27,7 +27,7 @@ describe('Dashboard', () => {
 
     const totals = screen.getAllByRole('listitem').map((item) => item.textContent);
     expect(totals).toEqual([
-      '3 events in the sheet',
+      '3 reachable from the browser',
       '1 passed',
       '1 failed',
       '1 not tested',

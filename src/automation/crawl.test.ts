@@ -37,7 +37,6 @@ function deps(driver: PageDriver, overrides: Partial<SweepDeps> = {}): SweepDeps
     hoverMs: 0,
     dwellMs: 0,
     isCancelled: () => false,
-    fieldRules: [],
     ...overrides,
   };
 }
@@ -184,7 +183,7 @@ describe('repeated controls', () => {
     return { id: `p${at}`, at, eventName: 'product_view', args: [], raw: '[]', origin: 'intercepted' };
   }
 
-  it('stops clicking a grid once one tile has produced an event', async () => {
+  it('stops clicking a grid once its tiles stop producing anything new', async () => {
     const page = grid(40);
     let clock = NOW;
 
@@ -195,17 +194,39 @@ describe('repeated controls', () => {
       }),
     );
 
-    // Forty product tiles all firing product_view tell us nothing forty times over.
-    expect(page.clicks()).toBe(1);
-    expect(outcome.skippedAsRepeats).toBe(39);
+    // Forty product tiles all firing product_view tell us nothing forty times over — but it takes
+    // a repeat to know they are repeats, so one click proves nothing and two confirm it.
+    expect(page.clicks()).toBe(3);
+    expect(outcome.skippedAsRepeats).toBe(37);
   });
 
-  it('gives a silent group a few tries before writing it off', async () => {
+  it('keeps clicking a group while each control fires a different event', async () => {
+    // Regression, ethniq.com: a row of profile tabs is one component, so retiring the group at
+    // the first success meant clicking `Order History` and never trying `My Subscriptions`,
+    // `My Cards` or `Recently Viewed`. Each tab is a different event; that is the whole point.
+    const page = grid(5);
+    let clock = NOW;
+    let tab = 0;
+
+    await sweepPage(
+      deps(page.driver, {
+        now: () => (clock += 1),
+        payloadsSince: () => {
+          tab += 1;
+          return [{ ...payload(clock), eventName: `tab_${tab}_clicked` }];
+        },
+      }),
+    );
+
+    expect(page.clicks()).toBe(5);
+  });
+
+  it('gives a silent group a couple of tries before writing it off', async () => {
     const page = grid(40);
 
     await sweepPage(deps(page.driver, { payloadsSince: () => [] }));
 
-    expect(page.clicks()).toBe(3);
+    expect(page.clicks()).toBe(2);
   });
 
   it('still clicks controls of different kinds', async () => {

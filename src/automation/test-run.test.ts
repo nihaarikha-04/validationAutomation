@@ -26,6 +26,7 @@ function result(status: ValidationResult['status']): ValidationResult {
     eventName: 'add_to_cart',
     missing: [],
     extra: [],
+    renamed: [],
     nullValues: [],
     emptyValues: [],
     typeMismatches: [],

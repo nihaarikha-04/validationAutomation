@@ -1,4 +1,5 @@
 import type { EventSchema, EventSheet } from '../event-sheet/types';
+import { similarity, tokensOf } from './name-similarity';
 
 export type EventMatch =
   | { readonly kind: 'matched'; readonly schema: EventSchema }
@@ -116,14 +117,23 @@ function closest(
     return undefined;
   }
 
-  const canonicalWanted = tokensOf(eventName, true);
+  const canonicalWanted = tokensOf(eventName, SYNONYMS);
 
   let best: { schema: EventSchema; score: number; reason: 'formatting' | 'synonym' } | undefined;
   for (const schema of sheet.events.values()) {
+    // Sheets qualify names they would otherwise repeat — `Product Viewed (Front End)` marks where
+    // the event comes from, it is not part of what the site calls it. Left in, those words dilute
+    // the score enough to lose to a genuinely different event: `product viewed` scored 0.67
+    // against `Product Viewed (Front End)` but 0.80 against `Product List Viewed`, and was
+    // validated against the wrong schema. Both spellings are tried and the better one counts.
+    const written = [schema.name, ...variantsOf(schema.name)];
+
     // The same words punctuated differently is a weaker claim than needing a synonym, so it is
     // tried first and reported differently.
-    const asWritten = similarity(wanted, tokensOf(schema.name));
-    const asMeant = similarity(canonicalWanted, tokensOf(schema.name, true));
+    const asWritten = Math.max(...written.map((name) => similarity(wanted, tokensOf(name))));
+    const asMeant = Math.max(
+      ...written.map((name) => similarity(canonicalWanted, tokensOf(name, SYNONYMS))),
+    );
 
     const score = Math.max(asWritten, asMeant);
     if (score < CLOSE_ENOUGH) {
@@ -138,32 +148,8 @@ function closest(
   return best;
 }
 
-function tokensOf(name: string, useSynonyms = false): ReadonlySet<string> {
-  const words = name
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-    .split(' ')
-    .filter((token) => token !== '');
-
-  if (!useSynonyms) {
-    return new Set(words);
-  }
-
-  return new Set(words.flatMap((word) => (SYNONYMS[word] ?? word).split(' ')));
-}
-
-/** Dice coefficient over the words: 1 when the names use exactly the same words. */
-function similarity(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
-  if (a.size === 0 || b.size === 0) {
-    return 0;
-  }
-  let shared = 0;
-  for (const token of a) {
-    if (b.has(token)) {
-      shared += 1;
-    }
-  }
-  return (2 * shared) / (a.size + b.size);
+/** The name without its trailing qualifier, when it carries one worth ignoring. */
+function variantsOf(name: string): readonly string[] {
+  const core = name.replace(/\s*\([^)]*\)\s*$/, '').trim();
+  return core === '' || core === name ? [] : [core];
 }

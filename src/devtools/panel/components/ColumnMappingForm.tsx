@@ -4,7 +4,6 @@ import {
   COLUMN_ROLES,
   FIELD_NAME_ROLES,
   REQUIRED_ROLES,
-  type ColumnCandidates,
   type ColumnMapping,
   type ColumnRole,
 } from '../../../event-sheet/types';
@@ -18,27 +17,28 @@ const ROLE_LABELS: Readonly<Record<ColumnRole, string>> = {
   required: 'Mandatory',
   description: 'Description',
   example: 'Example value',
+  source: 'Source (frontend / API)',
 };
 
 const NO_COLUMN = '';
 
 export interface ColumnMappingFormProps {
   readonly headers: readonly string[];
-  readonly candidates: ColumnCandidates;
-  readonly missing: readonly ColumnRole[];
+  /** Which column each role starts on — detection's guess, or the mapping already in use. */
+  readonly selected: Readonly<Partial<Record<ColumnRole, number>>>;
+  /** Why the form is on screen: detection gave up, or the user asked to see the columns. */
+  readonly note: string;
   readonly onSubmit: (mapping: ColumnMapping) => void;
 }
 
-/** Rendered only when detection is ambiguous — a resolved sheet never shows this form. */
-export function ColumnMappingForm({
-  headers,
-  candidates,
-  missing,
-  onSubmit,
-}: ColumnMappingFormProps) {
-  const [selection, setSelection] = useState<Readonly<Partial<Record<ColumnRole, number>>>>(
-    () => preselect(candidates),
-  );
+/**
+ * Shown when detection cannot resolve the columns, and whenever the user wants to check or
+ * change the ones in use. Mapping a role one column off silently produces a schema of the wrong
+ * field names, so the choice has to stay visible after it is made, not only before.
+ */
+export function ColumnMappingForm({ headers, selected, note, onSubmit }: ColumnMappingFormProps) {
+  const [selection, setSelection] =
+    useState<Readonly<Partial<Record<ColumnRole, number>>>>(selected);
   const [error, setError] = useState<string | undefined>(undefined);
 
   return (
@@ -56,11 +56,7 @@ export function ColumnMappingForm({
       }}
     >
       <h2>Confirm the columns</h2>
-      <p className="mapping__why">
-        {missing.length > 0
-          ? `Could not resolve automatically: ${missing.map((role) => ROLE_LABELS[role]).join(', ')}.`
-          : 'Could not resolve the columns automatically.'}
-      </p>
+      <p className="mapping__why">{note}</p>
 
       {COLUMN_ROLES.map((role) => (
         <label key={role} className="mapping__row">
@@ -100,18 +96,4 @@ export function ColumnMappingForm({
       <button type="submit">Use these columns</button>
     </form>
   );
-}
-
-/** A role with exactly one candidate is pre-filled; contested roles start empty. */
-function preselect(candidates: ColumnCandidates): Partial<Record<ColumnRole, number>> {
-  const selection: Partial<Record<ColumnRole, number>> = {};
-
-  for (const role of COLUMN_ROLES) {
-    const columns = candidates[role];
-    if (columns.length === 1) {
-      selection[role] = columns[0];
-    }
-  }
-
-  return selection;
 }

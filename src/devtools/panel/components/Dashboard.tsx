@@ -41,7 +41,8 @@ export function Dashboard({ report, onExport }: DashboardProps) {
 
       <ul className="dashboard__totals">
         <li className="dashboard__total">
-          <strong>{totals.events}</strong> events in the sheet
+          <strong>{totals.reachable}</strong> reachable from the browser
+          {totals.apiOnly > 0 ? <span> (of {totals.events} in the sheet)</span> : null}
         </li>
         <li className="dashboard__total dashboard__total--pass">
           <strong>{totals.passed}</strong> passed
@@ -52,6 +53,11 @@ export function Dashboard({ report, onExport }: DashboardProps) {
         <li className="dashboard__total dashboard__total--unseen">
           <strong>{totals.notTested}</strong> not tested
         </li>
+        {totals.apiOnly > 0 ? (
+          <li className="dashboard__total dashboard__total--api">
+            <strong>{totals.apiOnly}</strong> API only
+          </li>
+        ) : null}
       </ul>
 
       {/*
@@ -68,6 +74,14 @@ export function Dashboard({ report, onExport }: DashboardProps) {
           {totals.notTested} events never fired. That may mean they are unimplemented, or simply
           that this run never reached the flow that produces them — the two are not distinguished
           here.
+        </p>
+      ) : null}
+
+      {totals.apiOnly > 0 ? (
+        <p className="dashboard__caveat">
+          {totals.apiOnly} events are fired from a server, not the browser — the sheet's
+          <strong> Source (Frontend / API)</strong> column says so. Nothing done on the site can
+          produce them here. <strong>Check those in the Smartech panel instead.</strong>
         </p>
       ) : null}
 
