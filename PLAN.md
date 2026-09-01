@@ -943,6 +943,38 @@ The verdict rules, as decided while testing ethniq.com live:
 
 **Verified:** `pnpm typecheck`, `pnpm test` (451 passing, 28 files), `pnpm build`.
 
+- [x] **The sweep deleted a real saved address on a live account.** `DESTRUCTIVE` matched
+  `delete (my )?account` but not a bare `Delete` \u2014 which is the whole label a site puts on the
+  button beside a stored address \u2014 so it was classified `safe` and clicked. A prior test asserted
+  `Delete address` was safe, to stop the guard skipping the events those controls produce; that
+  trade was wrong and is reversed. `\\bdelete\\b` and `\\bdestroy\\b` are now destructive, as is
+  `remove` paired with a stored record (`address`, `card`, `payment`, `account`, `profile`,
+  `review`, `photo`, `image`). Bare `remove` stays safe \u2014 a cart line or a filter is reversible and
+  is an event the sheet wants tested. Reaching `Address Deleted (Profile)` now costs an explicit
+  opt-in via "Include Pay / Delete / Sign out". Files: `src/automation/sweep.ts`.
+
+**Verified:** `pnpm typecheck`, `pnpm test` (454 passing, 28 files), `pnpm build`.
+
+- [x] **A finished run produced no report and did not say why.** `record()` returned silently when
+  no sheet was loaded, so a ten-minute crawl \u2014 4 pages, 108 clicks, 241 payloads \u2014 ended with
+  pages and clicks on screen and no verdicts at all. The sheet had been put back into its mapping
+  state by the "Change columns" button, which drops the `sheet` prop to `undefined` until the
+  columns are confirmed. It now says so in the problem line, and a **Report on what was captured**
+  button builds the report from the payload stream at any time, so a run whose sheet arrived late
+  is recovered rather than repeated. Files: `src/devtools/panel/components/PageSweep.tsx`.
+
+**Verified:** `pnpm typecheck`, `pnpm test` (457 passing, 28 files), `pnpm build`.
+
+- [x] **The destructive guard blocked `Remove from Cart`.** Making a bare `Delete` destructive
+  protected saved addresses but also caught the bin icon on a cart line, which is reversible and
+  is an event the sheet asks for. Wording that names a reversible removal is now checked *before*
+  the destructive list, and a control inside a cart container (`class`/`id`/`data-testid`
+  containing "cart") is safe whatever its label says \u2014 the button is usually a bare bin icon, so
+  where it sits is the only signal there is. A bin icon in an address book is still destructive.
+  Files: `src/automation/sweep.ts`.
+
+**Verified:** `pnpm typecheck`, `pnpm test` (460 passing, 28 files), `pnpm build`.
+
 **Deferred:
 - `WhatsApp Opt-in` does not match a site-fired `whatsapp_opt_in` (0.571, below the 0.6 threshold):
   the camelCase splitter reads `WhatsApp` as `whats app`. The event is 🚫 Blocked in the sheet, so
