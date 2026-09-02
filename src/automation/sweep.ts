@@ -42,6 +42,20 @@ export interface Clickable {
    * in a list. A sweep clicks one of a group and skips the rest once it knows what they do.
    */
   readonly group: string;
+  /**
+   * Whether this control sits inside a modal, drawer or other overlay.
+   *
+   * Optional because it is a hint about ordering, not part of a control's identity: absent means
+   * "not known to be in one", which is how every control looked before this existed.
+   */
+  readonly inOverlay?: boolean;
+  /**
+   * Whether clicking this closes what it is in — an X, a Cancel, a backdrop dismiss.
+   *
+   * Optional for the same reason as `inOverlay`: it orders the sweep, it does not identify the
+   * control.
+   */
+  readonly dismisses?: boolean;
 }
 
 const CLICKABLE_SELECTOR =
@@ -123,6 +137,8 @@ export function findClickables(document: Document): readonly Clickable[] {
       label: labelOf(element),
       risk: riskOf(element),
       group: groupOf(element),
+      inOverlay: inOverlay(element),
+      dismisses: dismisses(element),
     });
   }
 
@@ -199,6 +215,72 @@ export function groupOf(element: Element): string {
 
   const parentClasses = [...parent.classList].sort().join('.');
   return `${tag}@${parent.nodeName.toLowerCase()}${parentClasses === '' ? '' : `.${parentClasses}`}`;
+}
+
+/**
+ * Labels that mean "close this".
+ *
+ * Whole-label matches, not substrings: a button reading exactly `×` or `Close` shuts the modal,
+ * while "Close my account" and "Cancel subscription" are something else entirely — and the second
+ * of those is already handled as destructive.
+ */
+const DISMISS_LABEL = /^(x|×|✕|✖|✗|⨯|close|dismiss|cancel|back|close modal|close dialog|no thanks|not now|maybe later|skip)$/i;
+
+/**
+ * Whether this control closes the thing it sits in.
+ *
+ * Asked so a modal's X is clicked *last*. It is almost always first in document order — top-right
+ * of the dialog — so the sweep opened a modal, immediately closed it again, and never touched the
+ * controls it was opened to reach. Every other control has to be spent before the one that throws
+ * the overlay away.
+ */
+function dismisses(element: Element): boolean {
+  if (element.hasAttribute('data-dismiss') || element.hasAttribute('data-bs-dismiss')) {
+    return true;
+  }
+
+  const aria = (element.getAttribute('aria-label') ?? '').trim();
+  if (DISMISS_LABEL.test(aria)) {
+    return true;
+  }
+
+  return DISMISS_LABEL.test(labelOf(element).trim());
+}
+
+/** Containers that announce themselves as an overlay. */
+const OVERLAY_SELECTOR = 'dialog, [role="dialog"], [aria-modal="true"]';
+
+/**
+ * Whether the control is inside something laid over the page.
+ *
+ * Asked so an overlay's contents can be clicked before the page underneath: a modal or cart
+ * drawer is transient, and the page beneath it is not going anywhere. Anything opened by a click
+ * would otherwise wait behind the rest of the page and often be dismissed before its turn came.
+ *
+ * Two signals, because sites split evenly between them. The semantic one is definitive. The
+ * layout one — a `fixed` ancestor — is what an overlay actually *is*, and catches the cart
+ * drawers and slide-overs that carry no role at all.
+ */
+function inOverlay(element: Element): boolean {
+  if (element.closest(OVERLAY_SELECTOR) !== null) {
+    return true;
+  }
+
+  const view = element.ownerDocument.defaultView;
+  if (view === null) {
+    return false;
+  }
+
+  for (
+    let ancestor: Element | null = element;
+    ancestor !== null;
+    ancestor = ancestor.parentElement
+  ) {
+    if (view.getComputedStyle(ancestor).position === 'fixed') {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Tags the element on first sight; the tag is what makes it findable later. */

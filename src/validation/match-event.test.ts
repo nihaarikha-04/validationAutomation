@@ -28,9 +28,23 @@ describe('matchEvent', () => {
     });
   });
 
-  it('does not fold case', () => {
-    // Silently equating these would hide the naming defect we exist to report.
-    expect(matchEvent('Add_To_Cart', sheetWith('add_to_cart')).kind).toBe('unknown');
+  /**
+   * Reversed on 2026-09-02: the Smartech debug log lowercases every event name on its way out, so
+   * the case a sheet uses cannot survive the trip and a difference in it is evidence of nothing.
+   * This previously asserted `unknown`, on the reasoning that folding case hides a naming defect —
+   * true of an SDK that preserves case, and false of this one. Separators and spelling are still
+   * not folded, and the test below still pins that.
+   */
+  it('folds case, because the debug log does', () => {
+    expect(matchEvent('ADD_TO_CART', sheetWith('add_to_cart')).kind).toBe('matched');
+    expect(matchEvent('Add_To_Cart', sheetWith('add_to_cart')).kind).toBe('matched');
+  });
+
+  it('reports a case-only difference as a plain match, not a disagreement', () => {
+    // Flagging these marked every event on a real run and buried the disagreements that were real.
+    expect(matchEvent('cart viewed', sheetWith('Cart Viewed'), new Map(), true).kind).toBe(
+      'matched',
+    );
   });
 
   it('does not normalise separators or whitespace', () => {
@@ -146,8 +160,10 @@ describe('matchEvent, sheet names carrying a qualifier', () => {
     const sheet = sheetWith('Product Viewed (Front End)', 'Product List Viewed');
     const match = matchEvent('product list viewed', sheet, new Map(), true);
 
-    expect(match.kind).toBe('close');
-    if (match.kind !== 'close') return;
+    // Case-only now, so it resolves outright rather than as a near miss — but the point of the
+    // test is which of the two similarly-named events it lands on, and that is unchanged.
+    expect(match.kind).toBe('matched');
+    if (match.kind !== 'matched') return;
     expect(match.schema.name).toBe('Product List Viewed');
   });
 

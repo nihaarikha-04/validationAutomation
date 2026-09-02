@@ -604,3 +604,24 @@ body {
 .runner__outcome--api-only { background: #ece9f8; color: #5b4bb7; }
 
 .runner__detail--warn { color: #b26a00; }
+
+/* Payment: an event nobody should trigger to satisfy a report. Kept visually distinct from a
+   plain gap, since it is a reason rather than a result. */
+.dashboard__total--payment strong { color: #a5601a; }
+.dashboard__total--payment { background: rgba(200, 130, 40, 0.16); }
+.runner__outcome--payment { background: #f6ecdd; color: #8a5015; }
+
+/* Fired, but disagreeing with the sheet — a correction to make, not an absence to chase. */
+.dashboard__total--warn { background: rgba(200, 150, 30, 0.18); }
+.dashboard__total--warn strong { color: #8a6300; }
+.runner__outcome--warning { background: #f5e8c8; color: #7a5800; }
+
+/* Named outright rather than left to be spotted in the table: a field the sheet describes and the
+   payload did not carry is the most common real finding, and the easiest to scroll past. */
+.verdict__missing {
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-left: 3px solid #b26a00;
+  background: rgba(200, 150, 30, 0.12);
+  font-size: 12px;
+}

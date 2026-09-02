@@ -3,16 +3,25 @@ import type { ValidationResult } from '../validation/types';
 /**
  * What became of one Event Sheet event during a run.
  *
- * `NOT SEEN` is deliberately not a failure. An event that never fired may be unimplemented, or
- * may simply sit behind a flow the run never reached — a login, a checkout, a page nobody
- * visited. Collapsing those two into FAIL would report defects that do not exist.
+ * Severity follows how hard the problem is to live with, not how loud it looks:
  *
- * `API ONLY` is not a result at all. The sheet says the event is fired server-to-server, so it
- * never reaches the browser and no amount of clicking will produce it — it has to be checked in
- * the Smartech panel instead. Leaving these in NOT SEEN inflated the gap by eleven events on the
- * first real sheet and made a complete run look like a third of one.
+ * - `PASS` — fired, and everything the sheet describes arrived correctly.
+ * - `WARNING` — fired, but something is wrong with it: a key renamed, a datatype that does not
+ *   match, a field the sheet expects and the payload omits. The integration works and needs a
+ *   correction.
+ * - `FAIL` — never fired. Nothing to correct, because nothing is there. A missing event is a
+ *   harder blocker than a wrong one, so it is the more severe verdict of the two.
+ *
+ * Two statuses are not results at all, and exist so the gap is not padded with things nobody could
+ * have produced:
+ *
+ * - `API ONLY` — the sheet says the event is sent server-to-server, so it never reaches the
+ *   browser and has to be checked in the Smartech panel.
+ * - `PAYMENT` — the event only fires when money actually moves. Nobody should put a live card
+ *   through a client's storefront to satisfy a report. Checkout is deliberately *not* in this
+ *   class: it costs nothing to reach and is expected to be swept.
  */
-export type EventStatus = 'PASS' | 'FAIL' | 'NOT SEEN' | 'API ONLY';
+export type EventStatus = 'PASS' | 'WARNING' | 'FAIL' | 'API ONLY' | 'PAYMENT';
 
 export interface EventOutcome {
   /** The Event Sheet's name for this event, which is the name a report is organised by. */
@@ -38,13 +47,17 @@ export interface EventOutcome {
 export interface RunTotals {
   /** Events the Event Sheet describes. The denominator for everything else. */
   readonly events: number;
-  /** Events observed firing at least once. */
+  /** Events observed firing at least once — the ones a verdict could be reached about. */
   readonly tested: number;
   readonly passed: number;
+  /** Fired, but carrying something the sheet disagrees with. */
+  readonly warning: number;
+  /** Never fired, and nothing excuses it. */
   readonly failed: number;
-  readonly notTested: number;
   /** Sheet events fired from a server, which this channel cannot observe at all. */
   readonly apiOnly: number;
+  /** Sheet events that only fire when money moves, so a run is not expected to produce them. */
+  readonly payment: number;
   /** Events that could have been produced from the browser: the honest denominator. */
   readonly reachable: number;
 }

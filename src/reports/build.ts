@@ -3,8 +3,10 @@ import type { CapturedPayload } from '../shared/payload';
 import { payloadSubject } from '../validation/from-capture';
 import { matchEvent } from '../validation/match-event';
 import { validateEvent } from '../validation/validate';
+import type { ValidationResult } from '../validation/types';
 import { DEFAULT_VALIDATION_OPTIONS, type ValidationOptions } from '../validation/types';
-import type { EventOutcome, RunReport, RunTotals } from './types';
+import { isPaymentEvent } from './payment';
+import type { EventOutcome, EventStatus, RunReport, RunTotals } from './types';
 
 export interface RunContext {
   readonly site: string;
@@ -47,9 +49,9 @@ export function buildReport(
 
     return {
       eventName: schema.name,
-      // A payload we could not read is not a pass. Nothing was checked, so it counts as untested
-      // rather than quietly inflating the passing total.
-      status: result === undefined ? 'NOT SEEN' : result.status === 'FAIL' ? 'FAIL' : 'PASS',
+      // A payload we could not read is not a pass — nothing was checked. It is treated exactly
+      // like an event that never arrived, because for reporting purposes it did not.
+      status: result === undefined ? unreachedStatus(schema) : firedStatus(result),
       firedAs: hit.observed === schema.name ? undefined : hit.observed,
       matchReason: hit.reason,
       checkedIn: undefined,
@@ -101,7 +103,7 @@ function unfired(
 
     return {
       ...base,
-      status: result.status === 'FAIL' ? 'FAIL' : 'PASS',
+      status: firedStatus(result),
       checkedIn: parent.name,
       // Everything else in the parent's payload belongs to the parent and to its other merged
       // children. Listing it against this one would report the whole event as undocumented here.
@@ -111,12 +113,39 @@ function unfired(
 
   return {
     ...base,
-    // A server-fired event was never going to appear here, so saying it "never fired" would be
-    // reporting the tool's blind spot as the site's defect.
-    status: schema.source === 'api' ? 'API ONLY' : 'NOT SEEN',
+    // Neither of these is the site's defect. A server-fired event was never going to appear
+    // here, and a payment event only happens when someone is charged — saying either "never
+    // fired" would report our own blind spots as findings.
+    status: unreachedStatus(schema),
     checkedIn: undefined,
     result: undefined,
   };
+}
+
+/**
+ * The verdict on an event that did fire.
+ *
+ * Anything the validator is unhappy about is a warning rather than a failure: the event exists and
+ * arrived, and a renamed key or a wrong datatype is a correction to make, not an absence to chase.
+ * Failure is reserved for events that never came at all.
+ */
+function firedStatus(result: ValidationResult): EventStatus {
+  return result.status === 'PASS' ? 'PASS' : 'WARNING';
+}
+
+/**
+ * The verdict on an event the run never saw.
+ *
+ * Excused first, if there is a reason: the sheet states outright which events are server-fired,
+ * and payment is inferred from the name, since no sheet has a column for "this one costs money".
+ * Everything else failed — an event that should have fired from the browser and did not is the
+ * finding this tool exists to produce.
+ */
+function unreachedStatus(schema: EventSchema): EventStatus {
+  if (schema.source === 'api') {
+    return 'API ONLY';
+  }
+  return isPaymentEvent(schema.name) ? 'PAYMENT' : 'FAIL';
 }
 
 /** The event a merged one was folded into, reconciling the sheet's two spellings of its name. */
@@ -185,17 +214,22 @@ function tally(events: readonly EventOutcome[]): RunTotals {
     events.filter((event) => event.status === status).length;
 
   const passed = countOf('PASS');
+  const warning = countOf('WARNING');
   const failed = countOf('FAIL');
   const apiOnly = countOf('API ONLY');
+  const payment = countOf('PAYMENT');
 
   return {
     events: events.length,
-    tested: passed + failed,
+    tested: passed + warning,
     passed,
+    warning,
     failed,
-    notTested: events.length - passed - failed - apiOnly,
     apiOnly,
-    reachable: events.length - apiOnly,
+    payment,
+    // What a run could honestly have produced. Server-fired and payment events are outside it, so
+    // a complete run reads as complete rather than as a third of one.
+    reachable: events.length - apiOnly - payment,
   };
 }
 

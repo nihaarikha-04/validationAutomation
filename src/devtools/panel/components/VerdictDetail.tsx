@@ -36,6 +36,20 @@ export function VerdictDetail({ verdict }: VerdictDetailProps) {
             : 'Same words, formatted differently — validated against the sheet, but the names disagree.'}
         </p>
       )}
+      {result.missing.length === 0 ? null : (
+        <p className="verdict__missing" role="status">
+          <strong>Missing from the debug log:</strong>{' '}
+          {result.missing.map((path, index) => (
+            <span key={path}>
+              {index > 0 ? ', ' : ''}
+              <code>{path}</code>
+            </span>
+          ))}
+          . The Event Sheet describes {result.missing.length === 1 ? 'this field' : 'these fields'}{' '}
+          and the payload did not carry {result.missing.length === 1 ? 'it' : 'them'}.
+        </p>
+      )}
+
     <table className="verdict__table">
       <thead>
         <tr>

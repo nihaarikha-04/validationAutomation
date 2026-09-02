@@ -41,7 +41,7 @@ describe('buildReport', () => {
     const report = buildReport(sheetOf(CART, LOGIN), [], CONTEXT);
 
     expect(report.events.map((event) => event.eventName)).toEqual(['Add to Cart', 'Sign in']);
-    expect(report.events.every((event) => event.status === 'NOT SEEN')).toBe(true);
+    expect(report.events.every((event) => event.status === 'FAIL')).toBe(true);
   });
 
   it('counts a correct payload as passed', () => {
@@ -52,30 +52,45 @@ describe('buildReport', () => {
     );
 
     expect(report.totals).toEqual({
-      events: 2, tested: 1, passed: 1, failed: 0, notTested: 1, apiOnly: 0, reachable: 2,
+      events: 2, tested: 1, passed: 1, warning: 0, failed: 1, apiOnly: 0, payment: 0, reachable: 2,
     });
   });
 
-  it('counts a payload missing a required field as failed', () => {
+  it('warns on a payload missing a required field', () => {
     const report = buildReport(
       sheetOf(CART),
       [fired('Add to Cart', { product_id: 'SKU1' })],
       CONTEXT,
     );
 
-    expect(report.totals.failed).toBe(1);
+    expect(report.totals.warning).toBe(1);
     expect(report.events[0]?.result?.missing).toEqual(['price']);
   });
 
   /**
-   * An event that never fired is not a defect until someone establishes it should have. Folding
-   * it into `failed` would report defects the run has no evidence for.
+   * Reversed deliberately on 2026-09-02, at the user's instruction. This previously asserted the
+   * opposite — that an event which never fired stays out of `failed`, on the grounds that a run
+   * cannot tell "unimplemented" from "never reached". That distinction is still real and is still
+   * stated on the dashboard and in the export's Comments column; what changed is which way the
+   * report leans when it cannot tell. A missing event is now the finding, and `API ONLY` and
+   * `PAYMENT` carry the cases that genuinely could not have fired.
    */
-  it('keeps events that never fired out of the failed count', () => {
+  it('fails an event that never fired', () => {
     const report = buildReport(sheetOf(CART, LOGIN), [], CONTEXT);
 
-    expect(report.totals.failed).toBe(0);
-    expect(report.totals.notTested).toBe(2);
+    expect(report.totals.failed).toBe(2);
+    expect(report.events.every((event) => event.status === 'FAIL')).toBe(true);
+  });
+
+  it('warns rather than fails when an event fired but disagrees with the sheet', () => {
+    const report = buildReport(
+      sheetOf(CART),
+      [fired('Add to Cart', { product_id: 'SKU1' })],
+      CONTEXT,
+    );
+
+    expect(report.events[0]?.status).toBe('WARNING');
+    expect(report.totals).toMatchObject({ warning: 1, failed: 0, tested: 1 });
   });
 
   it('reconciles a name the site spells differently, and says so', () => {
@@ -123,7 +138,7 @@ describe('buildReport', () => {
     const report = buildReport(sheetOf(CART), [bare], CONTEXT);
 
     expect(report.totals.passed).toBe(0);
-    expect(report.events[0]?.status).toBe('NOT SEEN');
+    expect(report.events[0]?.status).toBe('FAIL');
   });
 
   /** PLAN.md Terminology: a report must never let a reader assume the network call was checked. */
@@ -159,21 +174,22 @@ describe('buildReport, events the sheet says are fired from a server', () => {
   const apiEvent: EventSchema = { name: 'Order Placed', fields: [], source: 'api' };
 
   it('marks an unseen API event as API ONLY rather than never fired', () => {
-    // Reporting a server-fired event as NOT SEEN blames the site for the tool's blind spot: no
+    // Reporting a server-fired event as FAIL blames the site for the tool's blind spot: no
     // amount of clicking can produce it, so it is not evidence of anything.
     const report = buildReport(sheetOf(apiEvent), [], CONTEXT);
 
     expect(report.events[0]?.status).toBe('API ONLY');
   });
 
-  it('keeps API events out of the reachable denominator and the untested count', () => {
+  it('keeps API events out of the reachable denominator and out of the failures', () => {
     const report = buildReport(sheetOf(CART, apiEvent), [], CONTEXT);
 
     expect(report.totals).toMatchObject({
       events: 2,
       reachable: 1,
       apiOnly: 1,
-      notTested: 1,
+      // The one failure is CART, which could have fired and did not. The API event is excused.
+      failed: 1,
     });
   });
 
@@ -215,14 +231,18 @@ describe('buildReport, events the sheet merged into another', () => {
     expect(outcome?.checkedIn).toBe('Page View (Front End)');
   });
 
-  it('fails a merged event whose fields are absent from the parent payload', () => {
+  it('warns on a merged event whose fields are absent from the parent payload', () => {
     const report = buildReport(
       sheetOf(parent, child),
       [fired('Page View (Front End)', { page_url: '/profile' })],
       CONTEXT,
     );
 
-    expect(report.events.find((event) => event.eventName === 'Page Idle Time')?.status).toBe('FAIL');
+    // The parent fired, so this child was checked and came up short — a correction to make,
+    // not an event that never came. FAIL is reserved for the latter.
+    expect(report.events.find((event) => event.eventName === 'Page Idle Time')?.status).toBe(
+      'WARNING',
+    );
   });
 
   it('does not report the rest of the parent payload as undocumented on the child', () => {
@@ -236,11 +256,11 @@ describe('buildReport, events the sheet merged into another', () => {
       .toEqual([]);
   });
 
-  it('is NOT SEEN while the parent has not fired either', () => {
+  it('is FAIL while the parent has not fired either', () => {
     const report = buildReport(sheetOf(parent, child), [], CONTEXT);
 
     expect(report.events.find((event) => event.eventName === 'Page Idle Time')?.status)
-      .toBe('NOT SEEN');
+      .toBe('FAIL');
   });
 
   it('flags a merged event that fired on its own, and still validates it', () => {
@@ -256,5 +276,52 @@ describe('buildReport, events the sheet merged into another', () => {
     expect(outcome?.firedSeparately).toBe(true);
     expect(outcome?.status).toBe('PASS');
     expect(outcome?.checkedIn).toBeUndefined();
+  });
+});
+
+describe('payment events', () => {
+  const PAID: EventSchema = {
+    name: 'Order Placed',
+    fields: [field('order_id', 'string', true)],
+    source: 'frontend',
+  };
+  const CHECKOUT: EventSchema = {
+    name: 'Checkout Started',
+    fields: [field('value', 'number', true)],
+    source: 'frontend',
+  };
+
+  it('marks an unfired payment event PAYMENT rather than FAIL', () => {
+    const report = buildReport(sheetOf(PAID), [], CONTEXT);
+
+    expect(report.events[0]?.status).toBe('PAYMENT');
+    expect(report.totals).toMatchObject({ payment: 1, failed: 0, reachable: 0 });
+  });
+
+  /** Checkout costs nothing to reach, so it stays a real gap the run is expected to close. */
+  it('leaves an unfired checkout event as FAIL', () => {
+    const report = buildReport(sheetOf(CHECKOUT), [], CONTEXT);
+
+    expect(report.events[0]?.status).toBe('FAIL');
+    expect(report.totals).toMatchObject({ payment: 0, failed: 1, reachable: 1 });
+  });
+
+  /** Someone may have put a test order through by hand. That is a result, not an excuse. */
+  it('validates a payment event normally when it did fire', () => {
+    const report = buildReport(
+      sheetOf(PAID),
+      [fired('Order Placed', { order_id: 'A-1' })],
+      CONTEXT,
+    );
+
+    expect(report.events[0]?.status).toBe('PASS');
+    expect(report.totals.payment).toBe(0);
+  });
+
+  it('keeps payment out of the reachable denominator', () => {
+    const report = buildReport(sheetOf(PAID, CHECKOUT), [], CONTEXT);
+
+    expect(report.totals.events).toBe(2);
+    expect(report.totals.reachable).toBe(1);
   });
 });

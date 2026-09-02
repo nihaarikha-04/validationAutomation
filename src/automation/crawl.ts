@@ -1,6 +1,7 @@
 import type { AutomationReply, KnownFrame, PageDriver } from './commands';
 import type { CapturedPayload } from '../shared/payload';
 import type { Clickable, ClickRisk } from './sweep';
+import { urlShape } from './url-shape';
 
 /** A control plus the frame it lives in, so the click goes back to the right document. */
 interface FrameClickable extends Clickable {
@@ -25,6 +26,24 @@ const BARREN_TRIES = 2;
  * before this does — but a list of two hundred distinct controls should not eat an entire run.
  */
 const MAX_TRIES_PER_GROUP = 12;
+
+/**
+ * How many times one event is worth producing.
+ *
+ * A verdict needs one payload; a second is worth having because the first can be a first-load
+ * special case — an empty cart, a cold session. A third tells us nothing the first two did not,
+ * and a site where forty controls all fire `product_viewed` would otherwise spend a whole run
+ * re-confirming it while the events that never fired stay untested.
+ */
+const MAX_PER_EVENT = 2;
+
+/**
+ * Pages of one kind to visit before deciding the kind has nothing left to give.
+ *
+ * Two, for the same reason a control gets two clicks: the first shows what the template does, the
+ * second confirms it was not a first-load special case.
+ */
+const VISITS_PER_SHAPE = 2;
 
 /** How long to wait for a content script to come back after a navigation. */
 const PAGE_READY_TIMEOUT_MS = 15_000;
@@ -132,10 +151,12 @@ export interface GroupMemory {
   readonly barren: Map<string, number>;
   /** Clicks spent on each kind of control. */
   readonly tried: Map<string, number>;
+  /** How many times each event has been produced, anywhere on the site. */
+  readonly firedCounts: Map<string, number>;
 }
 
 export function newGroupMemory(): GroupMemory {
-  return { produced: new Map(), barren: new Map(), tried: new Map() };
+  return { produced: new Map(), barren: new Map(), tried: new Map(), firedCounts: new Map() };
 }
 
 export interface SweepMemory {
@@ -159,7 +180,7 @@ export async function sweepPage(
   /** Element ids, exact within this page load — the precise check while the document lives. */
   const visited = new Set<string>();
   const spent = memory.clickedHere;
-  const { produced, barren, tried } = memory.groups;
+  const { produced, barren, tried, firedCounts } = memory.groups;
   let unreachable = 0;
   let skippedAsRepeats = 0;
   const routesSeen = new Set<string>();
@@ -179,8 +200,29 @@ export async function sweepPage(
    * `Recently Viewed` before they were ever tried. What exhausts a group is running out of *new*
    * events, not producing one.
    */
-  const exhausted = (group: string): boolean =>
-    (barren.get(group) ?? 0) >= BARREN_TRIES || (tried.get(group) ?? 0) >= MAX_TRIES_PER_GROUP;
+  /**
+   * Whether this kind of control still has anything to teach us.
+   *
+   * Three ways to be finished: it stopped producing anything new, it hit the per-kind ceiling, or
+   * — the one that matters most for coverage — everything it produces has already been captured
+   * as often as it is worth capturing.
+   */
+  const exhausted = (group: string): boolean => {
+    if ((barren.get(group) ?? 0) >= BARREN_TRIES) {
+      return true;
+    }
+    if ((tried.get(group) ?? 0) >= MAX_TRIES_PER_GROUP) {
+      return true;
+    }
+
+    const events = produced.get(group);
+    if (events === undefined || events.size === 0) {
+      return false;
+    }
+    // Every event this control produces is already in hand. Clicking it again re-fires events we
+    // have and finds nothing we do not.
+    return [...events].every((name) => (firedCounts.get(name) ?? 0) >= MAX_PER_EVENT);
+  };
 
   // Where we began, so a click that navigates can be noticed.
   const opened = await deps.driver.send({ kind: 'location' });
@@ -247,16 +289,30 @@ export async function sweepPage(
     const worthClicking = available.filter((entry) => !exhausted(entry.group));
 
     /**
-     * Everything that stays on this page, before anything that leaves it.
+     * What to click next, in the order the page's own structure argues for.
      *
-     * Document order alone put the navbar first on every page, and a navbar link navigates — which
-     * ends the sweep. So each page spent its clicks walking the header away to somewhere else and
-     * never reached its own body: no Add to Cart, no quantity control, no tab, no accordion. The
-     * page's own buttons are the ones its events hang off, so they go first, and links are what
-     * the crawl follows once there is nothing left to do here.
+     * 1. **Overlays and iframes first.** A modal, a cart drawer or a widget in a frame is
+     *    transient — it is dismissed by the next Escape, or replaced when the page re-renders —
+     *    while the page underneath is not going anywhere. Clicking the page first meant an
+     *    overlay's contents regularly disappeared before their turn came.
+     * 2. **Then the rest of the page's own controls.** Document order alone put the navbar first
+     *    on every page, and a navbar link navigates, which ends the sweep — so each page spent its
+     *    clicks walking the header away and never reached its own body: no Add to Cart, no
+     *    quantity control, no tab, no accordion.
+     * 3. **Anything that closes an overlay after both**, so a modal is explored before it is shut.
+     * 4. **Links last**, since following one is what hands the crawl to another page, and this one
+     *    should be finished first.
      */
+    const stays = worthClicking.filter((entry) => entry.risk !== 'navigates');
+    // A control that closes what it is in goes last of all: an overlay's X sits first in document
+    // order, so taking it in turn meant opening a modal and immediately closing it again without
+    // touching a single one of the controls it was opened to reach.
+    const keeps = stays.filter((entry) => entry.dismisses !== true);
     const next =
-      worthClicking.find((entry) => entry.risk !== 'navigates') ?? worthClicking[0];
+      keeps.find((entry) => entry.inOverlay === true || entry.frameId !== 0) ??
+      keeps[0] ??
+      stays[0] ??
+      worthClicking[0];
     if (next === undefined) {
       // Nothing left to click here. If a click opened an overlay, closing it may reveal the page
       // underneath — so try that once, then stop if it changes nothing.
@@ -362,6 +418,15 @@ export async function sweepPage(
       }
     }
     produced.set(next.group, seenForGroup);
+
+    // Count every firing, not only the novel ones: the cap is on how often an event is produced
+    // across the whole run, whichever control produced it.
+    for (const payload of fired) {
+      if (payload.eventName !== undefined) {
+        firedCounts.set(payload.eventName, (firedCounts.get(payload.eventName) ?? 0) + 1);
+      }
+    }
+
     // A click that turns up something new earns this kind of control another go.
     barren.set(next.group, novel.length > 0 ? 0 : (barren.get(next.group) ?? 0) + 1);
     observations.push({
@@ -437,6 +502,12 @@ export interface CrawlOutcome {
   readonly pages: readonly PageResult[];
   readonly captured: readonly CapturedPayload[];
   readonly stopped: string | undefined;
+  /**
+   * Pages left unopened because another page of the same kind had already been swept and produced
+   * nothing new. Counted rather than hidden — a crawl that quietly skipped half a site would look
+   * identical to one that never found it.
+   */
+  readonly skippedAsSameKind: number;
 }
 
 /**
@@ -462,7 +533,12 @@ export interface CrawlOutcome {
 export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
   const start = await deps.driver.send({ kind: 'location' });
   if (start.kind !== 'location') {
-    return { pages: [], captured: [], stopped: 'Could not read the current page address.' };
+    return {
+      pages: [],
+      captured: [],
+      stopped: 'Could not read the current page address.',
+      skippedAsSameKind: 0,
+    };
   }
 
   /** Pages found but not yet opened, in the order they were found. */
@@ -477,6 +553,10 @@ export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
    * restarting it, which would otherwise loop forever.
    */
   const spentPerPage = new Map<string, Set<string>>();
+  /** How many pages of each kind have been swept, and what those sweeps produced. */
+  const shapeVisits = new Map<string, number>();
+  const shapeEvents = new Map<string, Set<string>>();
+  let skippedAsSameKind = 0;
   /**
    * What each kind of control is worth, learned once for the whole crawl.
    *
@@ -494,6 +574,35 @@ export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
   const pageLimit = deps.maxPages > 0 ? deps.maxPages : Number.POSITIVE_INFINITY;
   const clickLimit = deps.clicksPerPage > 0 ? deps.clicksPerPage : Number.POSITIVE_INFINITY;
 
+  /**
+   * Whether another page of this kind is still worth opening.
+   *
+   * Evidence, not guesswork: a kind is only written off once pages of it have actually been swept
+   * and everything they produced is already captured as often as it is worth capturing. A shape
+   * that is too broad therefore costs nothing — it keeps being visited while it keeps producing.
+   */
+  const exhaustedShape = (shape: string): boolean => {
+    if ((shapeVisits.get(shape) ?? 0) < VISITS_PER_SHAPE) {
+      return false;
+    }
+
+    // An empty set means pages of this kind produced nothing at all, twice. More of them will not
+    // produce anything either.
+    const seen = shapeEvents.get(shape) ?? new Set<string>();
+    return [...seen].every((name) => (groups.firedCounts.get(name) ?? 0) >= MAX_PER_EVENT);
+  };
+
+  /** The next queued page whose kind still has something to teach us. */
+  const nextWorthOpening = (): string | undefined => {
+    for (let candidate = queue.shift(); candidate !== undefined; candidate = queue.shift()) {
+      if (!exhaustedShape(urlShape(candidate))) {
+        return candidate;
+      }
+      skippedAsSameKind += 1;
+    }
+    return undefined;
+  };
+
   const enqueue = (urls: readonly string[]): void => {
     for (const found of urls) {
       const key = normalise(found);
@@ -506,7 +615,7 @@ export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
 
   while (stack.length > 0 || queue.length > 0) {
     if (deps.isCancelled()) {
-      return { pages: [...results.values()], captured, stopped: 'Stopped.' };
+      return { pages: [...results.values()], captured, stopped: 'Stopped.', skippedAsSameKind };
     }
 
     // Nothing part-finished, so start the next page we know about — provided we may open another.
@@ -514,7 +623,7 @@ export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
       if (results.size >= pageLimit) {
         break;
       }
-      const next = queue.shift();
+      const next = nextWorthOpening();
       if (next === undefined) {
         break;
       }
@@ -530,6 +639,9 @@ export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
 
     // Only navigate if we are not already there — a click may have taken us to this very page,
     // and reloading would throw away the state that click produced.
+    const arrivedAt = deps.now();
+    let justNavigated = false;
+
     if (key !== normalise(currentUrl)) {
       const resuming = spentPerPage.has(key);
       deps.onProgress(
@@ -537,6 +649,7 @@ export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
           ? `Returning to ${url} to finish it`
           : `Opening page ${results.size + 1}${describeLimit(pageLimit)}: ${url}`,
       );
+      justNavigated = true;
       await deps.driver.send({ kind: 'navigate', url });
 
       if (!(await waitForPage(deps))) {
@@ -544,10 +657,33 @@ export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
           pages: [...results.values()],
           captured,
           stopped: `Gave up waiting for ${url} to load.`,
+          skippedAsSameKind,
         };
       }
     }
     currentUrl = url;
+
+    /**
+     * What the page fired simply by loading.
+     *
+     * `product_view` and `page_view` are produced by arriving, not by clicking, and the sweep only
+     * ever samples after a click — so these were captured by nobody and belonged to no page. That
+     * also blinded the "same kind of page" rule, which decides on what a kind of page produces:
+     * with page-load events invisible, every product page looked like it produced nothing.
+     *
+     * Only after a real navigation. Sampling when we are already here would re-attribute events
+     * the previous sweep has already counted.
+     */
+    const onLoad = justNavigated ? deps.payloadsSince(arrivedAt) : [];
+    captured.push(...onLoad);
+    for (const payload of onLoad) {
+      if (payload.eventName !== undefined) {
+        groups.firedCounts.set(
+          payload.eventName,
+          (groups.firedCounts.get(payload.eventName) ?? 0) + 1,
+        );
+      }
+    }
 
     // Links are read *before* clicking anything. A click can navigate or break the page, and
     // collecting the queue afterwards meant one bad click ended the whole crawl at page one.
@@ -569,6 +705,16 @@ export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
     // record of what each kind of control is worth clicking.
     const outcome = await sweepPage(deps, clickLimit, { clickedHere, groups });
     captured.push(...outcome.captured);
+
+    const shape = urlShape(url);
+    shapeVisits.set(shape, (shapeVisits.get(shape) ?? 0) + 1);
+    const producedHere = shapeEvents.get(shape) ?? new Set<string>();
+    for (const payload of [...onLoad, ...outcome.captured]) {
+      if (payload.eventName !== undefined) {
+        producedHere.add(payload.eventName);
+      }
+    }
+    shapeEvents.set(shape, producedHere);
 
     // Links again, now that the sweep has opened menus and overlays. Gathering only beforehand
     // meant everything an overlay revealed was invisible to the crawl.
@@ -611,7 +757,7 @@ export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
     }
   }
 
-  return { pages: [...results.values()], captured, stopped: undefined };
+  return { pages: [...results.values()], captured, stopped: undefined, skippedAsSameKind };
 }
 
 /**

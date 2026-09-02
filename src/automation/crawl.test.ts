@@ -194,10 +194,11 @@ describe('repeated controls', () => {
       }),
     );
 
-    // Forty product tiles all firing product_view tell us nothing forty times over — but it takes
-    // a repeat to know they are repeats, so one click proves nothing and two confirm it.
-    expect(page.clicks()).toBe(3);
-    expect(outcome.skippedAsRepeats).toBe(37);
+    // Forty product tiles all firing product_view tell us nothing forty times over. Two clicks
+    // is the cap on how often one event is worth producing: the first is the verdict, the second
+    // guards against a first-load special case, and the rest re-confirm what is already in hand.
+    expect(page.clicks()).toBe(2);
+    expect(outcome.skippedAsRepeats).toBe(38);
   });
 
   it('keeps clicking a group while each control fires a different event', async () => {
@@ -305,9 +306,11 @@ describe('frames', () => {
     await sweepPage(deps(driver));
 
     // A control inside a frame must be clicked in that frame; the top document cannot reach it.
+    // The frame goes first: like an overlay, a frame's contents can be replaced out from under
+    // the sweep, while the top document is not going anywhere.
     expect(clicks).toEqual([
-      { frameId: 0, selector: '#top' },
       { frameId: 7, selector: '#inner' },
+      { frameId: 0, selector: '#top' },
     ]);
   });
 
@@ -341,7 +344,8 @@ describe('frames', () => {
 
     await sweepPage(deps(driver));
 
-    expect(clicks).toEqual([0, 3]);
+    // Frame first, top document second — the ordering, not just the identity, is deliberate.
+    expect(clicks).toEqual([3, 0]);
   });
 
   it('reports how many frames answered', async () => {
@@ -1247,5 +1251,394 @@ describe('the navbar no longer eats the crawl', () => {
 
     // The second page inherits the first's verdict on `a.nav`, so it does not re-walk the header.
     expect(second.clicks()).not.toContain('About');
+  });
+});
+
+describe('how often one event is worth producing', () => {
+  /** Every control fires the same event, whatever its kind — a site-wide page_view, say. */
+  function alwaysFires(controls: number, kindPerControl = false) {
+    let clicks = 0;
+    const driver: PageDriver = {
+      send: (command) => {
+        switch (command.kind) {
+          case 'location':
+            return Promise.resolve({ kind: 'location', url: 'https://shop.test/', stamp: 'doc' });
+          case 'clickables':
+            return Promise.resolve({
+              kind: 'clickables',
+              clickables: Array.from({ length: controls }, (_, index) => ({
+                selector: `#c${index}`,
+                label: `Control ${index}`,
+                risk: 'safe' as const,
+                group: kindPerControl ? `button.kind${index}` : 'button.same',
+              })),
+            });
+          case 'click':
+            clicks += 1;
+            return Promise.resolve({ kind: 'clicked' });
+          default:
+            return Promise.resolve({ kind: 'dismissed' });
+        }
+      },
+    };
+    return { driver, clicks: () => clicks };
+  }
+
+  const firesPageView = () => [
+    {
+      id: 'p',
+      at: NOW,
+      eventName: 'page_view',
+      args: [],
+      raw: '[]',
+      origin: 'intercepted' as const,
+    },
+  ];
+
+  it('stops after two clicks on a kind of control whose event is already in hand', async () => {
+    const page = alwaysFires(20);
+
+    await sweepPage(deps(page.driver, { payloadsSince: firesPageView }));
+
+    expect(page.clicks()).toBe(2);
+  });
+
+  /**
+   * The honest limit of the cap. Twenty *different* kinds of control that all happen to fire the
+   * same event cost one click each to find that out — nothing can know what a control does before
+   * it is clicked. What the cap guarantees is that none of them is clicked a second time.
+   */
+  it('spends at most one click discovering each new kind of control', async () => {
+    const page = alwaysFires(20, true);
+
+    await sweepPage(deps(page.driver, { payloadsSince: firesPageView }));
+
+    expect(page.clicks()).toBe(20);
+  });
+
+  it('carries the tally across pages, not just within one sweep', async () => {
+    const groups = newGroupMemory();
+    const payloadsSince = () => [
+      { id: 'p', at: NOW, eventName: 'page_view', args: [], raw: '[]', origin: 'intercepted' as const },
+    ];
+
+    const first = alwaysFires(20);
+    await sweepPage(deps(first.driver, { payloadsSince }), undefined, {
+      clickedHere: new Set(),
+      groups,
+    });
+
+    const second = alwaysFires(20);
+    await sweepPage(deps(second.driver, { payloadsSince }), undefined, {
+      clickedHere: new Set(),
+      groups,
+    });
+
+    // The cap was already met on the first page; the second spends nothing re-confirming it.
+    expect(second.clicks()).toBe(0);
+  });
+
+  it('keeps clicking while a control still turns up events it has not seen', async () => {
+    const page = alwaysFires(6);
+    let count = 0;
+
+    await sweepPage(
+      deps(page.driver, {
+        payloadsSince: () => {
+          count += 1;
+          return [
+            { id: `p${count}`, at: NOW, eventName: `event_${count}`, args: [], raw: '[]', origin: 'intercepted' },
+          ];
+        },
+      }),
+    );
+
+    expect(page.clicks()).toBe(6);
+  });
+});
+
+describe('overlays before the page underneath', () => {
+  function pageWith(clickables: readonly { selector: string; label: string; group: string; inOverlay?: boolean }[]) {
+    const clicked: string[] = [];
+    const driver: PageDriver = {
+      send: (command) => {
+        switch (command.kind) {
+          case 'location':
+            return Promise.resolve({ kind: 'location', url: 'https://shop.test/', stamp: 'doc' });
+          case 'clickables':
+            return Promise.resolve({
+              kind: 'clickables',
+              clickables: clickables.map((entry) => ({ ...entry, risk: 'safe' as const })),
+            });
+          case 'click':
+            clicked.push(command.selector);
+            return Promise.resolve({ kind: 'clicked' });
+          default:
+            return Promise.resolve({ kind: 'dismissed' });
+        }
+      },
+    };
+    return { driver, clicked: () => clicked };
+  }
+
+  /**
+   * A modal or cart drawer is transient — dismissed by the next Escape, or replaced when the page
+   * re-renders. The page beneath it is not going anywhere, so it can wait.
+   */
+  it('clicks a modal’s controls before the page beneath it', async () => {
+    const page = pageWith([
+      { selector: '#page1', label: 'Page button', group: 'button.page' },
+      { selector: '#modal1', label: 'In the modal', group: 'button.modal', inOverlay: true },
+      { selector: '#page2', label: 'Another page button', group: 'button.page2' },
+    ]);
+
+    await sweepPage(deps(page.driver));
+
+    expect(page.clicked()[0]).toBe('#modal1');
+  });
+
+  it('leaves ordering alone when nothing is overlaid', async () => {
+    const page = pageWith([
+      { selector: '#a', label: 'A', group: 'button.a' },
+      { selector: '#b', label: 'B', group: 'button.b' },
+    ]);
+
+    await sweepPage(deps(page.driver));
+
+    expect(page.clicked()).toEqual(['#a', '#b']);
+  });
+});
+
+describe('not walking the same kind of page twice over', () => {
+  /**
+   * A storefront: one shop page linking to many product pages, each firing `product_view` on load
+   * and offering nothing to click.
+   */
+  function storefront(products: number) {
+    const opened: string[] = [];
+    let here = 'https://shop.test/shop';
+
+    const driver: PageDriver = {
+      send: (command) => {
+        switch (command.kind) {
+          case 'location':
+            return Promise.resolve({ kind: 'location', url: here, stamp: here });
+          case 'links':
+            return Promise.resolve({
+              kind: 'links',
+              urls: Array.from({ length: products }, (_, i) => `https://shop.test/products/item-${i}`),
+            });
+          case 'clickables':
+            return Promise.resolve({ kind: 'clickables', clickables: [] });
+          case 'navigate':
+            opened.push(command.url);
+            here = command.url;
+            return Promise.resolve({ kind: 'navigating' });
+          default:
+            return Promise.resolve({ kind: 'dismissed' });
+        }
+      },
+    };
+
+    /** Every product page fires the same event, the way a template does. */
+    const payloadsSince = (): readonly CapturedPayload[] =>
+      here.includes('/products/')
+        ? [
+            {
+              id: here,
+              at: NOW,
+              eventName: 'product_view',
+              args: [],
+              raw: '[]',
+              origin: 'intercepted',
+            },
+          ]
+        : [];
+
+    return { driver, payloadsSince, opened: () => opened };
+  }
+
+  it('opens two product pages, not forty', async () => {
+    const site = storefront(40);
+
+    const outcome = await crawlSite({
+      ...deps(site.driver, { payloadsSince: site.payloadsSince }),
+      maxPages: 0,
+      clicksPerPage: 0,
+    });
+
+    expect(site.opened().filter((url) => url.includes('/products/'))).toHaveLength(2);
+    expect(outcome.skippedAsSameKind).toBe(38);
+  });
+
+  /** Skipping half a site silently would look exactly like never having found it. */
+  it('reports how many it left alone', async () => {
+    const site = storefront(10);
+
+    const outcome = await crawlSite({
+      ...deps(site.driver, { payloadsSince: site.payloadsSince }),
+      maxPages: 0,
+      clicksPerPage: 0,
+    });
+
+    expect(outcome.skippedAsSameKind).toBe(8);
+  });
+
+  /**
+   * The safety property that makes a blunt shape acceptable: a kind is only written off once it
+   * has been watched and found to repeat itself.
+   */
+  it('keeps visiting pages of a kind while they still produce something new', async () => {
+    const site = storefront(6);
+    let count = 0;
+    const payloadsSince = (): readonly CapturedPayload[] => {
+      count += 1;
+      return [
+        {
+          id: `p${count}`,
+          at: NOW,
+          eventName: `event_${count}`,
+          args: [],
+          raw: '[]',
+          origin: 'intercepted',
+        },
+      ];
+    };
+
+    const outcome = await crawlSite({
+      ...deps(site.driver, { payloadsSince }),
+      maxPages: 0,
+      clicksPerPage: 0,
+    });
+
+    expect(outcome.skippedAsSameKind).toBe(0);
+  });
+});
+
+describe('events a page fires by loading', () => {
+  function site() {
+    let here = 'https://shop.test/shop';
+    const driver: PageDriver = {
+      send: (command) => {
+        switch (command.kind) {
+          case 'location':
+            return Promise.resolve({ kind: 'location', url: here, stamp: here });
+          case 'links':
+            return Promise.resolve({ kind: 'links', urls: ['https://shop.test/products/one'] });
+          case 'clickables':
+            return Promise.resolve({ kind: 'clickables', clickables: [] });
+          case 'navigate':
+            here = command.url;
+            return Promise.resolve({ kind: 'navigating' });
+          default:
+            return Promise.resolve({ kind: 'dismissed' });
+        }
+      },
+    };
+    return { driver, where: () => here };
+  }
+
+  /**
+   * `product_view` is produced by arriving, not by clicking. The sweep only samples after a click,
+   * so before this these belonged to no page and were captured by nobody.
+   */
+  it('captures what arriving on a page produced', async () => {
+    const page = site();
+
+    const outcome = await crawlSite({
+      ...deps(page.driver, {
+        payloadsSince: () =>
+          page.where().includes('/products/')
+            ? [
+                {
+                  id: 'p',
+                  at: NOW,
+                  eventName: 'product_view',
+                  args: [],
+                  raw: '[]',
+                  origin: 'intercepted' as const,
+                },
+              ]
+            : [],
+      }),
+      maxPages: 0,
+      clicksPerPage: 0,
+    });
+
+    expect(outcome.captured.map((payload) => payload.eventName)).toContain('product_view');
+  });
+
+  /** Sampling again on a page we never left would count the same events twice. */
+  it('does not re-attribute events when it did not navigate', async () => {
+    const page = site();
+    let samples = 0;
+
+    await crawlSite({
+      ...deps(page.driver, {
+        payloadsSince: () => {
+          samples += 1;
+          return [];
+        },
+      }),
+      maxPages: 0,
+      clicksPerPage: 0,
+    });
+
+    // The starting page is swept without navigating to it, so only the second page is sampled.
+    expect(samples).toBe(1);
+  });
+});
+
+describe('exploring a modal before closing it', () => {
+  /** A modal as sites build them: the X first in document order, the real controls after it. */
+  const MODAL = [
+    { selector: '#x', label: '×', group: 'button.close', inOverlay: true, dismisses: true },
+    { selector: '#apply', label: 'Apply', group: 'button.apply', inOverlay: true },
+    { selector: '#save', label: 'Save', group: 'button.save', inOverlay: true },
+    { selector: '#page', label: 'Page button', group: 'button.page' },
+  ];
+
+  function page() {
+    const clicked: string[] = [];
+    const driver: PageDriver = {
+      send: (command) => {
+        switch (command.kind) {
+          case 'location':
+            return Promise.resolve({ kind: 'location', url: 'https://shop.test/', stamp: 'doc' });
+          case 'links':
+            return Promise.resolve({ kind: 'links', urls: [] });
+          case 'clickables':
+            return Promise.resolve({
+              kind: 'clickables',
+              clickables: MODAL.map((entry) => ({ ...entry, risk: 'safe' as const })),
+            });
+          case 'click':
+            clicked.push(command.selector);
+            return Promise.resolve({ kind: 'clicked' });
+          default:
+            return Promise.resolve({ kind: 'dismissed' });
+        }
+      },
+    };
+    return { driver, clicked: () => clicked };
+  }
+
+  it('clicks the modal’s own controls before its close button', async () => {
+    const site = page();
+
+    await sweepPage(deps(site.driver));
+
+    const clicked = site.clicked();
+    expect(clicked.indexOf('#apply')).toBeLessThan(clicked.indexOf('#x'));
+    expect(clicked.indexOf('#save')).toBeLessThan(clicked.indexOf('#x'));
+  });
+
+  /** Closing throws the overlay away, so it comes after the page beneath as well. */
+  it('leaves the close button until everything else has been spent', async () => {
+    const site = page();
+
+    await sweepPage(deps(site.driver));
+
+    expect(site.clicked().at(-1)).toBe('#x');
   });
 });

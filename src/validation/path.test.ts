@@ -96,3 +96,34 @@ describe('leafPaths', () => {
     expect(leafPaths({ a: { __special: 'undefined' } })).toEqual(['a']);
   });
 });
+
+describe('the debug log lowercases everything', () => {
+  /** A sheet may capitalise a key; the log will not. That is transport, not a defect. */
+  it('finds a key the sheet capitalised', () => {
+    expect(readPath({ product_id: 'SKU1' }, 'Product_ID')).toEqual({
+      kind: 'found',
+      value: 'SKU1',
+    });
+  });
+
+  it('finds a nested key the sheet capitalised', () => {
+    expect(readPath({ items: [{ prid: 'A' }] }, 'Items[0].PRID')).toEqual({
+      kind: 'found',
+      value: 'A',
+    });
+  });
+
+  it('prefers an exact key over one that only matches when folded', () => {
+    expect(readPath({ id: 'lower', ID: 'upper' }, 'ID')).toEqual({ kind: 'found', value: 'upper' });
+  });
+
+  /** Case is the only thing forgiven. A key spelled differently is a real disagreement. */
+  it('does not fold punctuation or spelling', () => {
+    expect(readPath({ product_id: 'SKU1' }, 'productid').kind).toBe('missing');
+    expect(readPath({ product_id: 'SKU1' }, 'product-id').kind).toBe('missing');
+  });
+
+  it('still reports a key that is genuinely absent', () => {
+    expect(readPath({ product_id: 'SKU1' }, 'price').kind).toBe('missing');
+  });
+});

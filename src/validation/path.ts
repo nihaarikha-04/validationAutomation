@@ -79,13 +79,37 @@ export function readPath(source: TransferableValue, path: string): PathLookup {
     }
 
     const record = current as Record<string, TransferableValue>;
-    if (!Object.hasOwn(record, segment.key)) {
+    const key = keyIn(record, segment.key);
+    if (key === undefined) {
       return { kind: 'missing' };
     }
-    current = record[segment.key] as TransferableValue;
+    current = record[key] as TransferableValue;
   }
 
   return { kind: 'found', value: current };
+}
+
+/**
+ * The key this record actually holds, for a key the Event Sheet asked for.
+ *
+ * Exact first, because that is what a correct sheet and a correct payload agree on. Failing that,
+ * case is ignored: the Smartech debug log lowercases every key on its way out, so a sheet writing
+ * `Product_ID` describes the same field as a payload carrying `product_id` — the difference is
+ * the transport, not a defect, and reporting the field as missing would be a false finding.
+ *
+ * Nothing looser than case. A key that differs by punctuation or spelling is a real disagreement
+ * and is reported as one.
+ */
+function keyIn(
+  record: Record<string, TransferableValue>,
+  wanted: string,
+): string | undefined {
+  if (Object.hasOwn(record, wanted)) {
+    return wanted;
+  }
+
+  const folded = wanted.toLowerCase();
+  return Object.keys(record).find((key) => key.toLowerCase() === folded);
 }
 
 /**

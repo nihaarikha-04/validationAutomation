@@ -8,7 +8,7 @@ const REPORT: RunReport = {
   sheetName: 'events.xlsx',
   sdkReady: true,
   at: 1_735_689_600_000,
-  totals: { events: 3, tested: 2, passed: 1, failed: 1, notTested: 1, apiOnly: 0, reachable: 3 },
+  totals: { events: 3, tested: 2, passed: 1, failed: 1, warning: 0, apiOnly: 0, payment: 0, reachable: 3 },
   events: [],
   undocumented: [],
   channel: 'debug-payload',
@@ -29,8 +29,8 @@ describe('Dashboard', () => {
     expect(totals).toEqual([
       '3 reachable from the browser',
       '1 passed',
-      '1 failed',
-      '1 not tested',
+      '0 warning',
+      '1 not triggered',
     ]);
   });
 
@@ -41,11 +41,11 @@ describe('Dashboard', () => {
     expect(screen.getByText(/debug payload/)).toBeInTheDocument();
   });
 
-  it('does not present events that never fired as failures', () => {
+  it('says a missing event may be unreached rather than absent', () => {
     render(<Dashboard report={REPORT} onExport={() => undefined} />);
 
     expect(screen.getByText(/never fired/)).toHaveTextContent(
-      /they are unimplemented, or simply that this run never reached/,
+      /confirm the flow was reachable before reporting one as a defect/,
     );
   });
 
@@ -74,5 +74,41 @@ describe('Dashboard', () => {
       site: 'shop.example.com',
       channel: 'debug-payload',
     });
+  });
+});
+
+describe('payment events on the dashboard', () => {
+  const WITH_PAYMENT: RunReport = {
+    ...REPORT,
+    totals: { ...REPORT.totals, payment: 4, warning: 0, reachable: 3 },
+  };
+
+  it('counts them separately from the gap', () => {
+    render(<Dashboard report={WITH_PAYMENT} onExport={() => undefined} />);
+
+    expect(screen.getByText(/^4$/).parentElement).toHaveTextContent('4 payment');
+  });
+
+  it('says why they were not triggered, and that they should not have been', () => {
+    render(<Dashboard report={WITH_PAYMENT} onExport={() => undefined} />);
+
+    expect(screen.getByText(/only fire when money actually moves/)).toHaveTextContent(
+      /putting a live card through the site to satisfy a report is not a test/,
+    );
+  });
+
+  /** The distinction the caveat exists to make. */
+  it('says checkout is not counted as payment', () => {
+    render(<Dashboard report={WITH_PAYMENT} onExport={() => undefined} />);
+
+    expect(screen.getByText(/only fire when money actually moves/)).toHaveTextContent(
+      /is not counted here/,
+    );
+  });
+
+  it('shows nothing about payment when the sheet has none', () => {
+    render(<Dashboard report={REPORT} onExport={() => undefined} />);
+
+    expect(screen.queryByText(/only fire when money actually moves/)).toBeNull();
   });
 });

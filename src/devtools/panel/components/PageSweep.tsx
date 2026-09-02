@@ -93,6 +93,8 @@ export function PageSweep({
   const [pages, setPages] = useState<readonly PageResult[]>([]);
   const [observations, setObservations] = useState<readonly Observation[]>([]);
   const [skipped, setSkipped] = useState(0);
+  /** Pages left unopened because a page of the same kind had already been swept. */
+  const [sameKind, setSameKind] = useState(0);
   const [report, setReport] = useState<RunReport | undefined>(undefined);
   const [problem, setProblem] = useState<string | undefined>(undefined);
   const running = progress !== undefined;
@@ -134,6 +136,7 @@ export function PageSweep({
     setReport(undefined);
     setPages([]);
     setSkipped(0);
+    setSameKind(0);
     cancelled.current = false;
     deadline.current = minutes > 0 ? now() + minutes * 60_000 : undefined;
     setProgress('Starting…');
@@ -175,6 +178,7 @@ export function PageSweep({
         setPages(outcome.pages);
         setObservations(outcome.pages.flatMap((page) => page.observations));
         setSkipped(outcome.pages.reduce((total, page) => total + page.skippedAsRepeats, 0));
+        setSameKind(outcome.skippedAsSameKind);
         record();
         setProblem(outcome.stopped ?? outcome.pages.find((page) => page.stopped)?.stopped);
       } else {
@@ -522,6 +526,9 @@ export function PageSweep({
           <summary>
             {observations.length} clicks
             {skipped > 0 ? `, ${skipped} skipped as repeats of the same control` : ''}
+            {sameKind > 0
+              ? `, ${sameKind} pages skipped — another page of the same kind had already been swept`
+              : ''}
           </summary>
           <ul>
             {observations.map((entry) => (

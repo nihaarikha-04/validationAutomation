@@ -55,10 +55,16 @@ describe('validateEvent', () => {
     expect(result.missing).toEqual(['product_id']);
   });
 
-  it('does not penalise a missing optional field', () => {
+  /**
+   * Reversed on 2026-09-02 at the user's request: a field the sheet describes and the payload does
+   * not carry is now worth a warning whether or not it is marked mandatory. On a sheet with no
+   * mandatory column every field is optional, so the old rule let a payload omit all but one and
+   * still pass. Warning, not failing — the report names the field and the reader decides.
+   */
+  it('warns about a missing optional field, and names it', () => {
     const result = validateEvent({ product_id: 'SKU123', price: 499 }, CART, AT);
 
-    expect(result.status).toBe('PASS');
+    expect(result.status).toBe('WARNING');
     expect(result.missing).toEqual(['currency']);
   });
 
@@ -166,11 +172,12 @@ describe('validateEvent', () => {
 
   it('ignores extra fields by default', () => {
     const result = validateEvent(
-      { product_id: 'SKU123', price: 499, coupon: 'SAVE10' },
+      { product_id: 'SKU123', price: 499, currency: 'INR', coupon: 'SAVE10' },
       CART,
       AT,
     );
 
+    // Nothing is missing here, so an extra key on its own leaves the verdict clean.
     expect(result.status).toBe('PASS');
     // Still reported as data; the policy governs the verdict, not the record.
     expect(result.extra).toEqual(['coupon']);
@@ -301,10 +308,13 @@ describe('a payload with none of the expected fields', () => {
     expect(result.missing).toEqual(['page_url', 'page_type']);
   });
 
-  it('still passes when even one expected field is present', () => {
+  it('warns rather than fails when at least one expected field is present', () => {
     const result = validateEvent({ page_url: '/shop' }, ALL_OPTIONAL, AT);
 
-    expect(result.status).toBe('PASS');
+    // Not a failure: something the sheet describes did arrive. But `page_type` did not, and that
+    // is named rather than passed over.
+    expect(result.status).toBe('WARNING');
+    expect(result.missing).toEqual(['page_type']);
   });
 
   /** An event the sheet describes no fields for has nothing to be absent. */

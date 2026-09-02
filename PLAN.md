@@ -828,6 +828,168 @@ superseded by D10).
   - *A fixture that fired no events had to be corrected rather than the code:* it clicked three
     controls of one group and expected all three to be tried, which the barren rule now correctly
     refuses. Firing a distinct event per click — what a real page does — restored it.
+- **Payment events are now their own status, not part of the gap (2026-09-02).** An event that only
+  fires when money moves was sitting in NOT SEEN beside events that genuinely failed to fire, which
+  states two very different things in the same word. Nobody should put a live card through a
+  client's storefront to satisfy a report, and the sweep's own safety gate refuses to click those
+  controls unless explicitly asked — so not seeing one is not a finding.
+  - `EventStatus` gains `PAYMENT`, alongside `API ONLY` and for the same reason: both name a
+    blind spot of this tool rather than a defect of the site. `RunTotals` gains `payment`, and
+    `reachable` now excludes it, so a run that covered everything it could reads as complete.
+  - **Checkout is deliberately excluded**, and both the code and the dashboard say so. A checkout
+    can be started and completed on any storefront without a card being charged, so excusing it as
+    PAYMENT would hide a real gap behind a reason that does not apply. `Buy Now` is excluded for
+    the same reason — it opens a checkout, it does not pay for anything. Tests name all three.
+  - *Matched on the event name*, in `src/reports/payment.ts`, because a name is the only signal
+    every sheet carries — no client's sheet has a "this one costs money" column. Phrases rather
+    than bare words, for the reason the sweep's destructive guard already learned: `order` alone
+    matches "Order Details" and "Order Tracking", `card` alone matches a product card. Tests pin
+    the whole order-history section as *not* payment.
+  - *Kept deliberately narrow.* Labelling an event PAYMENT hides it from the gap, so a phrase earns
+    its place only when it cannot mean anything else. Anything uncertain stays NOT SEEN, which
+    overstates the gap rather than concealing it — the safer direction to be wrong in.
+  - *An event that did fire is validated normally*, whatever its name. Someone may have put a test
+    order through by hand, and that is a result rather than an excuse.
+- **The export now reads like the Event Sheet it is compared against (2026-09-02).**
+  - *Event columns are written once per event and left blank underneath*, the way every real sheet
+    writes a multi-field event and the way the parser already forward-fills on the way in.
+    Repeating the name on all nine rows of a payload made the export unreadable beside the sheet.
+    True merged cells need a spreadsheet format — CSV has none, and a blank continuation cell is
+    what a spreadsheet shows when a merge is unmerged. XLSX can merge properly once it exists.
+  - *Two columns added.* **Smartech debug logs (`<date>`)** carries the captured payload on the
+    event's own row, dated because a report is a snapshot and a sheet that accumulates rounds of
+    testing has to say which day each column came from. **Comments** says in words what the status
+    columns say in codes: `Renaming — the sheet says "product_id", the payload sends "prid".`,
+    `Incorrect data type — expected number, received string.`, `Not sent, and the sheet marks it
+    mandatory.`, `Event not triggered`, `Pass`.
+- **Severity re-cut, at the user's instruction (2026-09-02): a missing event is worse than a wrong
+  one.**
+  - `PASS` — fired and clean. `WARNING` — fired, but a key was renamed, a datatype does not match,
+    or a field the sheet expects is absent. `FAIL` — never fired at all.
+  - *This reverses the earlier policy recorded above*, which kept unfired events out of `failed` on
+    the grounds that a run cannot tell "unimplemented" from "never reached". That distinction is
+    real and has **not** been discarded: the dashboard still says so in words, and asks the reader
+    to confirm the flow was reachable before reporting one as a defect. What changed is which way
+    the report leans when it cannot tell — towards naming the gap rather than excusing it. The test
+    that pinned the old behaviour was rewritten in place with the reversal explained, rather than
+    quietly deleted.
+  - *The excuses still hold, and are what keep this honest.* `API ONLY` and `PAYMENT` absorb the
+    events that genuinely could not have fired, so re-cutting FAIL this way does not re-inflate the
+    gap with things nobody could have produced.
+  - *A merged child checked inside a parent that arrived without its fields warns rather than
+    fails* — the parent fired, so the child was checked and came up short. FAIL stays reserved for
+    events that never came.
+  - *`RunTotals.notTested` is gone*, replaced by `warning` and a `failed` that now means "not
+    triggered". Two names for one idea would have been worse than renaming it.
+- **An event is now produced at most twice, and overlays are swept before the page beneath
+  (2026-09-02).**
+  - *Per-event cap.* `MAX_PER_EVENT = 2`. The first payload is the verdict; the second guards
+    against a first-load special case — an empty cart, a cold session — and a third confirms
+    nothing the first two did not. A kind of control is retired once every event it produces is
+    already in hand, so a grid of forty tiles all firing `product_viewed` now costs two clicks
+    rather than three, and the run spends what it saves on events that have not fired at all.
+  - *The tally is run-wide, not per sweep*, held in `GroupMemory` beside the group state, so the
+    cap survives moving to another page and returning to this one.
+  - *The honest limit, stated because it matters:* the cap is enforced per **kind** of control.
+    Twenty different kinds that all happen to fire the same event still cost one click each to
+    discover that — nothing can know what a control does before clicking it. What is guaranteed is
+    that none of them is clicked a second time. A test pins exactly this rather than implying a
+    stronger promise.
+  - *Overlays and iframes are clicked first.* A modal, a cart drawer or a widget in a frame is
+    transient — it is dismissed by the next Escape or replaced when the page re-renders — while the
+    page underneath is not going anywhere. Sweeping the page first meant an overlay's contents
+    regularly disappeared before their turn came. The order is now: overlay and frame controls,
+    then the rest of the page's own controls, then links.
+  - *How an overlay is recognised:* `Clickable.inOverlay`, set by two signals because sites split
+    evenly between them. The semantic one — `dialog`, `[role="dialog"]`, `[aria-modal="true"]` — is
+    definitive. The layout one, a `position: fixed` ancestor, is what an overlay actually *is*, and
+    catches the cart drawers and slide-overs that carry no role at all. Optional on the type: it is
+    a hint about ordering, not part of a control's identity.
+  - *Two existing frame tests were updated rather than worked around*: they pinned the top document
+    being clicked before a frame's contents, which is the ordering this change deliberately
+    reverses. The reason is recorded in both.
+- **Header detection no longer wanders into the data (2026-09-02).** `HEADER_SEARCH_DEPTH` was 30
+  rows; it is now 5. Headers sit in the first or second row of a real Event Sheet — the only thing
+  above them is a title like "Events", occasionally with a blank line — so five rows covers every
+  shape seen with slack to spare.
+  - *Searching deeper was not more forgiving, it was more dangerous.* The scorer picks whichever row
+    matches the most role names, and data rows are full of role names: a description cell containing
+    the word "Attribute", or a field named `payload`, scores like a header. One wrong header row maps
+    every column to the wrong thing and parses the whole sheet into nonsense — silently, with a
+    confident-looking result.
+  - *Failing to find a header now falls to manual mapping*, which is a question the user can answer,
+    rather than to a wrong answer nobody is prompted to check.
+  - *Tested against rows taken from a real client workbook*, since the limit is only correct if it
+    covers the shapes sheets actually have: one tab opens with a title row above the header, another
+    puts the header on row one. A fourth test pins the failure this guards against — a data row deep
+    in the sheet that reads like a header is now ignored.
+- **The crawl no longer walks the same kind of page over and over (2026-09-02).** A storefront links
+  to hundreds of product pages; visiting each one re-fired `product_view` and `category_view` while
+  events that had never fired stayed untested.
+  - *Why the per-event cap did not already stop it:* that cap governs **clicking**. `product_view`
+    is produced by *arriving* on a page, and nothing was clicked to cause it, so it fell outside
+    every rule the sweep had.
+  - **Page-load events are now captured**, which was a real gap in its own right — `sweepPage` only
+    ever samples payloads after a click, so events fired by a page load belonged to no page and
+    were captured by nobody. The crawl now samples across the navigation and settle, adds them to
+    the run's payloads, and counts them towards the per-event cap. Only after a real navigation:
+    sampling again on a page we never left would count the same events twice.
+  - **Pages are grouped by kind, and a kind is visited twice.** `urlShape` reduces a URL to the
+    template behind it: `/products/easy-peasy-gut` and `/products/gut-shot` share a shape, and so
+    do `/order/48898902917371` and `/order/47438996`. Once two pages of a kind have been swept and
+    everything they produced is already captured as often as it is worth capturing, the rest are
+    left alone.
+  - *The shaping is blunt on purpose and safe because of the gate.* Collapsing the last segment also
+    merges `/profile/orders` with `/profile/settings`, which are genuinely different pages. That
+    costs nothing: a kind is never written off until the crawl has watched it and found it repeats
+    itself, so an over-broad shape keeps being visited while it keeps producing. A too-narrow shape
+    would simply never stop the repetition it exists to stop. Tests pin both directions.
+  - *One rule had to be narrowed after it broke a test:* "a segment containing a digit is an
+    identifier" flattened `/next-1` and `/other-1` into one shape, and those are ordinary distinct
+    pages. A segment now has to be *nothing but* an identifier — all digits, or a uuid or hash.
+  - *Skipped pages are counted and shown* in the panel's run summary. A crawl that quietly skipped
+    half a site would look identical to one that never found it.
+- **Case is now understood as transport, not as a defect (2026-09-02).** The Smartech debug log
+  lowercases every event name and every payload key on its way out, so the case an Event Sheet uses
+  cannot survive the trip and a difference in it is evidence of nothing.
+  - *Event names.* `matchEvent` folds case before it reaches close matching, and reports the result
+    as a plain `matched` rather than a naming disagreement. Previously every event on a real run —
+    five out of five — came back flagged `firedAs: "cart viewed" … matchReason: "formatting"`, which
+    buried the disagreements that were real.
+  - *Payload keys.* `readPath` tries the exact key first, then falls back to a case-insensitive
+    match, so a sheet writing `Product_ID` finds a payload carrying `product_id` instead of
+    reporting the field missing — a false finding on every capitalised key in a sheet.
+  - **Case is the only thing forgiven, deliberately.** Separators, punctuation and spelling are
+    still compared as written: `productid` and `product-id` do not match `product_id`, and
+    `Add to Cart` still does not match `add_to_cart` outside close matching. Folding those would
+    hide the naming defects this tool exists to find, which is the reasoning the original rule was
+    built on and which still holds everywhere except case.
+  - *Two tests that pinned the old rule were rewritten in place with the reversal explained.* One
+    asserted outright that case is not folded; the other happened to depend on a case-only
+    difference resolving as a near miss rather than a match, and now asserts the match while still
+    pinning the thing it was written for — which of two similarly-named events it lands on.
+- **A field the sheet describes and the payload does not carry now warns, by name (2026-09-02).**
+  - Previously only a *mandatory* missing field counted, and an optional one passed silently. On a
+    sheet with no mandatory column — which the first real one had — every field is optional, so a
+    payload could omit all but one and still come back clean.
+  - Warning rather than failure: the event fired and most of it arrived. The report names the
+    fields — `Missing from the debug log: page_url, page_type` — above the per-field table, since
+    that is the most common real finding and the easiest to scroll past in a long table.
+  - *Three tests were rewritten with the reversal explained*, one of which had asserted outright
+    that a missing optional field is not penalised.
+- **A modal is now explored before it is closed (2026-09-02).** Overlay controls were already taken
+  first, but an overlay's X sits first in document order — top-right of the dialog — so the sweep
+  opened a modal, immediately closed it again, and never touched the controls it was opened to
+  reach.
+  - `Clickable.dismisses` marks a control that closes what it sits in, and the sweep spends every
+    other control before it. The order is now: overlay and frame controls, then the rest of the
+    page, then anything that dismisses, then links.
+  - *Whole-label matches only*, and that boundary is tested in both directions: a button reading
+    exactly `×`, `Close`, `Cancel` or `No thanks` shuts an overlay, while "Close my account" and
+    "Cancel subscription" are something else entirely — the second of those is already destructive.
+    `data-dismiss` and an `aria-label` of "Close" count too.
+  - This composes with the existing lazy dismissal rather than replacing it: Escape is still sent
+    once nothing clickable remains, so an overlay with no close button of its own is still cleared.
 - *Not yet done from this phase's checklist:* the dashboard shows the run's own totals but is not
   wired to the SDK/debug status bar as a single view; the two still render separately.
 

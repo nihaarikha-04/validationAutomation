@@ -101,7 +101,7 @@ describe('PageSweep', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Sweep page' }));
 
     expect(await screen.findByText('PASS')).toBeInTheDocument();
-    expect(await screen.findByText('NOT SEEN')).toBeInTheDocument();
+    expect(await screen.findByText('FAIL')).toBeInTheDocument();
   });
 
   it('reports on events captured before the sweep began', async () => {

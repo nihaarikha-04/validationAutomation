@@ -255,3 +255,63 @@ describe('riskOf, removing a cart line', () => {
     expect(riskOf(button)).toBe('destructive');
   });
 });
+
+describe('findClickables and overlays', () => {
+  /**
+   * Built in the live document rather than a detached one: the fixed-position check reads computed
+   * style, and a document made by `createHTMLDocument` has no window to compute against — the same
+   * reason `isUsable` treats a viewless document as visible.
+   */
+  function overlayFlagFor(html: string): boolean | undefined {
+    document.body.innerHTML = html;
+    return findClickables(document).find((entry) => entry.label === 'Target')?.inOverlay;
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('marks a control inside a dialog', () => {
+    expect(overlayFlagFor('<div role="dialog"><button>Target</button></div>')).toBe(true);
+  });
+
+  it('marks a control inside a fixed-position drawer that carries no role', () => {
+    expect(overlayFlagFor('<div style="position: fixed"><button>Target</button></div>')).toBe(true);
+  });
+
+  it('leaves an ordinary control alone', () => {
+    expect(overlayFlagFor('<main><button>Target</button></main>')).toBe(false);
+  });
+});
+
+describe('controls that close what they are in', () => {
+  function only(html: string): boolean | undefined {
+    document.body.innerHTML = html;
+    return findClickables(document).find((entry) => entry.label !== 'Keep')?.dismisses;
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it.each([
+    '<button>×</button>',
+    '<button>X</button>',
+    '<button>Close</button>',
+    '<button aria-label="Close">✕</button>',
+    '<button data-dismiss="modal">Done</button>',
+    '<button>No thanks</button>',
+  ])('recognises %s as a dismiss', (html) => {
+    expect(only(html)).toBe(true);
+  });
+
+  /** Whole-label matches only: these are ordinary controls that merely contain the word. */
+  it.each([
+    '<button>Close my account</button>',
+    '<button>Cancel subscription</button>',
+    '<button>Add to Cart</button>',
+    '<button>Back to shopping and checkout</button>',
+  ])('leaves %s alone', (html) => {
+    expect(only(html)).toBe(false);
+  });
+});

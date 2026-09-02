@@ -72,11 +72,16 @@ const SYNONYMS: Readonly<Record<string, string>> = {
 };
 
 /**
- * Exact name match only.
+ * Exact name match, then case, then — only if asked — close matching.
  *
- * No case-folding, no whitespace normalisation, no fuzzy matching. A tool that quietly treats
+ * No whitespace normalisation and no fuzzy matching by default. A tool that quietly treats
  * `Add to Cart` and `add_to_cart` as the same event hides exactly the defect it exists to find.
  * Aliases are accepted, but only ones a user supplied deliberately.
+ *
+ * **Case is the exception, and it is not a concession.** The Smartech debug log lowercases every
+ * event name on its way out, so the case a sheet uses cannot survive the trip and a difference in
+ * it is evidence of nothing. Reporting one as a naming disagreement flagged every event on a real
+ * run — five out of five — and buried the disagreements that were real.
  */
 export function matchEvent(
   eventName: string,
@@ -89,6 +94,12 @@ export function matchEvent(
 
   if (schema !== undefined) {
     return { kind: 'matched', schema };
+  }
+
+  // The log lowercased it. That is the transport, not the implementation, so it is a match.
+  const folded = matchByCase(target, sheet);
+  if (folded !== undefined) {
+    return { kind: 'matched', schema: folded };
   }
 
   if (allowClose) {
@@ -105,6 +116,24 @@ export function matchEvent(
   }
 
   return { kind: 'unknown', eventName, knownEvents: [...sheet.events.keys()] };
+}
+
+/**
+ * The sheet event whose name differs only in case.
+ *
+ * Separate from close matching because it is a different claim: close matching says two spellings
+ * probably mean one event, while this says the two names *are* the same name once the log's
+ * lowercasing is undone.
+ */
+function matchByCase(eventName: string, sheet: EventSheet): EventSchema | undefined {
+  const wanted = eventName.toLowerCase();
+
+  for (const [name, schema] of sheet.events) {
+    if (name.toLowerCase() === wanted) {
+      return schema;
+    }
+  }
+  return undefined;
 }
 
 /** The sheet event whose name overlaps this one most, if any overlap enough to count. */

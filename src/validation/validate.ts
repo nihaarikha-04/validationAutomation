@@ -157,6 +157,16 @@ function decideStatus(
     return 'FAIL';
   }
 
+  /**
+   * A field the sheet describes and the payload does not carry.
+   *
+   * Warned about whether or not the sheet marks it mandatory. A sheet lists a field because
+   * someone expects it to be there, and "optional" in a sheet usually means nobody filled the
+   * mandatory column in rather than that the field is genuinely dispensable — on a sheet with no
+   * such column at all, every field is optional and a payload could omit all but one and still
+   * pass. Which fields are missing is named in the report; the reader decides whether it matters.
+   */
+  const absent = fields.some((field) => field.status === 'missing');
   const blankOptional = fields.some(
     (field) => !field.required && (field.status === 'null' || field.status === 'empty'),
   );
@@ -164,7 +174,7 @@ function decideStatus(
   const renamed = fields.some((field) => field.status === 'renamed');
   const extraWarning = options.extraFields === 'warn' && extra.length > 0;
 
-  return blankOptional || unverifiable || renamed || extraWarning ? 'WARNING' : 'PASS';
+  return absent || blankOptional || unverifiable || renamed || extraWarning ? 'WARNING' : 'PASS';
 }
 
 function classify(

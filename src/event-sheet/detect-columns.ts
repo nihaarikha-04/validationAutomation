@@ -10,8 +10,20 @@ import {
   type SheetGrid,
 } from './types';
 
-/** How far into the sheet to look for a header row before giving up. */
-const HEADER_SEARCH_DEPTH = 30;
+/**
+ * How far into the sheet to look for a header row.
+ *
+ * Headers sit in the first or second row of a real Event Sheet — the only thing above them is a
+ * title like "Events", occasionally with a blank line. Five rows covers that with slack to spare.
+ *
+ * Searching deeper is not more forgiving, it is more dangerous: the scorer picks whichever row
+ * matches the most role names, and *data* rows are full of role names. A description cell
+ * containing the word "Attribute", or a field named "payload", scores like a header — and one
+ * wrong row maps every column to the wrong thing, parsing the whole sheet into nonsense.
+ * Refusing to look that far means a sheet with no recognisable header falls to manual mapping,
+ * which is a question the user can answer, rather than to a confident wrong answer.
+ */
+const HEADER_SEARCH_DEPTH = 5;
 
 /**
  * Header synonyms per role, matched flexibly rather than by exact header text.

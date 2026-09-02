@@ -202,3 +202,80 @@ describe('detectColumns, a role with several partial claimants', () => {
     expect(detection.missing).toContain('payloadName');
   });
 });
+
+/**
+ * Header rows taken from a real client workbook, because the depth limit is only correct if it
+ * covers the shapes sheets actually have. One tab opens with a title row above the header; another
+ * puts the header on the very first row.
+ */
+describe('header rows as real sheets write them', () => {
+  const TITLE_THEN_HEADER = [
+    ['Events', '', '', '', '', '', '', '', '', '', ''],
+    [
+      'SR. No',
+      'Event Name',
+      'Attribute',
+      'ATT Description',
+      'Payload',
+      'ATTRIBUTE data type',
+      'Array Payload',
+      'Data type',
+      'Array data type',
+      'Payload Description',
+      'Development Status',
+    ],
+    ['1.0', 'Registration', 'Mobile Number', 'Registered mobile', 'mobile_number', 'TEXT', '', '', '', '', 'Done'],
+  ];
+
+  const HEADER_FIRST = [
+    [
+      ' ',
+      'Event Name',
+      'Status',
+      'Attribute',
+      'Attribute Data Type',
+      'Attribute Description',
+      'Payload Key',
+      'Array Payload Key',
+      'Payload Data Type',
+      'Array Element Type',
+      'Payload Description',
+      'Notes',
+      'Source (Frontend / API)',
+    ],
+    ['1.0', 'Registration', 'New', 'Mobile Number', 'TEXT', 'Primary key', 'mobile_number', '', '', '', '', '', 'Frontend'],
+  ];
+
+  it('finds a header sitting under a title row', () => {
+    expect(detectColumns(TITLE_THEN_HEADER).headerRow).toBe(1);
+  });
+
+  it('finds a header on the very first row', () => {
+    expect(detectColumns(HEADER_FIRST).headerRow).toBe(0);
+  });
+
+  it('maps the roles it needs from a full sheet', () => {
+    const detection = detectColumns(HEADER_FIRST);
+    if (detection.kind !== 'resolved') {
+      throw new Error(`expected a resolved mapping, got ${detection.kind}`);
+    }
+
+    expect(HEADER_FIRST[0]?.[detection.mapping.eventName]).toBe('Event Name');
+    expect(HEADER_FIRST[0]?.[detection.mapping.payloadName ?? -1]).toBe('Payload Key');
+    expect(HEADER_FIRST[0]?.[detection.mapping.source ?? -1]).toBe('Source (Frontend / API)');
+  });
+
+  /**
+   * The reason the search stops after five rows. A data row full of role words outscores a real
+   * header, and one wrong header row maps every column to the wrong thing.
+   */
+  it('ignores a data row deep in the sheet that reads like a header', () => {
+    const grid = [
+      ['Event Name', 'Payload', 'Data type'],
+      ...Array.from({ length: 8 }, () => ['Registration', 'mobile_number', 'TEXT']),
+      ['Event Name', 'Payload Key', 'Payload Data Type', 'Attribute', 'Description', 'Example'],
+    ];
+
+    expect(detectColumns(grid).headerRow).toBe(0);
+  });
+});
