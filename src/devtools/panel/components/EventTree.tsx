@@ -1,4 +1,5 @@
 import { fieldIdentity } from '../../../event-sheet/normalize';
+import { subIntentsFrom, type SubIntent } from '../../../event-sheet/sub-intents';
 import type { EventSheet } from '../../../event-sheet/types';
 
 export interface EventTreeProps {
@@ -38,6 +39,10 @@ export function EventTree({ sheet }: EventTreeProps) {
                   <code>{event.name}</code>
                   <span className="tree__count">{event.fields.length} fields</span>
                 </summary>
+
+                {event.trigger === undefined ? null : (
+                  <Trigger prose={event.trigger.source} />
+                )}
                 <table className="tree__table">
                   <thead>
                     <tr>
@@ -67,4 +72,55 @@ export function EventTree({ sheet }: EventTreeProps) {
       )}
     </section>
   );
+}
+
+/**
+ * What the sheet says about producing this event, and what was read out of it.
+ *
+ * Shown because the reading is a *claim about the client's sentence* that only a person can check,
+ * and the alternative is finding out it was wrong several stages later as a step that clicked
+ * nothing. The client's own words stay visible beside it, so the two can be compared without
+ * leaving the panel.
+ *
+ * Read-only. Nothing here runs anything.
+ */
+function Trigger({ prose }: { readonly prose: string }) {
+  const intents = subIntentsFrom(prose);
+
+  return (
+    <div className="tree__trigger">
+      <p className="tree__prose">{prose}</p>
+
+      {intents.length === 0 ? (
+        <p className="tree__none">
+          Nothing to do was read out of this. That is right for an event that fires on its own or
+          comes from a server, and wrong for one that describes clicking something — if it is the
+          latter, the sentence is worth passing on.
+        </p>
+      ) : (
+        <ol className="tree__intents">
+          {intents.map((intent, index) => (
+            <li key={`${index}-${intent.source}`}>
+              <span className="tree__kind">{intent.kind}</span>
+              <code>{describe(intent)}</code>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+/** Named in the client's words, because that is what a person can check it against. */
+function describe(intent: SubIntent): string {
+  switch (intent.kind) {
+    case 'fill':
+      return `${intent.target} = ${intent.value ?? ''}`;
+    case 'ask':
+      return `${intent.target} — ask the tester for their ${intent.valueKind}`;
+    case 'navigate':
+      return intent.value ?? intent.target;
+    default:
+      return intent.target;
+  }
 }

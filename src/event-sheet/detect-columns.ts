@@ -55,6 +55,34 @@ const ROLE_SYNONYMS: Readonly<Record<ColumnRole, readonly string[]>> = {
   description: ['description', 'desc', 'definition', 'notes', 'note', 'comments', 'comment', 'remarks'],
   example: ['example value', 'sample value', 'example values', 'sample data', 'example', 'sample'],
   source: ['source frontend api', 'event source', 'fired from', 'source', 'channel'],
+  /*
+   * The column where a client writes how the event is produced.
+   *
+   * "Trigger condition" is what the sheets in hand actually say. The looser synonyms are kept
+   * behind it and deliberately do not include a bare "action" or "steps", which collide with
+   * `eventName`'s "action name" and with column headers meaning something else entirely.
+   */
+  trigger: [
+    'trigger condition',
+    'trigger conditions',
+    'trigger criteria',
+    'trigger description',
+    'trigger point',
+    'event trigger',
+    'when to trigger',
+    'when it fires',
+    'when does it fire',
+    'firing condition',
+    'how to trigger',
+    'how to test',
+    'steps to trigger',
+    'steps to reproduce',
+    'user journey',
+    'user action',
+    'scenario',
+    'condition',
+    'trigger',
+  ],
 };
 
 /**
@@ -194,6 +222,7 @@ function withOptionalRoles(
     description: selection.description,
     example: selection.example,
     source: selection.source,
+    trigger: selection.trigger,
   };
 }
 
@@ -277,6 +306,7 @@ function collectCandidates(headers: readonly string[]): ColumnCandidates {
     attributeName: [],
     attributeType: [],
     required: [],
+    trigger: [],
     description: [],
     example: [],
     source: [],

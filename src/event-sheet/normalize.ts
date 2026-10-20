@@ -46,6 +46,7 @@ export function normalizeSheet(
   const fieldsByEvent = new Map<string, FieldSchema[]>();
   const sourceByEvent = new Map<string, EventSource>();
   const mergeByEvent = new Map<string, string>();
+  const triggerByEvent = new Map<string, string>();
   let currentEvent = '';
 
   if (mapping.required === undefined) {
@@ -83,6 +84,19 @@ export function normalizeSheet(
       const parent = readMergeTarget(cells);
       if (parent !== undefined) {
         mergeByEvent.set(currentEvent, parent);
+      }
+
+      /*
+       * Taken from the row that names the event, like `source` above and for the same reason: a
+       * trigger describes the whole event, and the field rows beneath it are blank in that column
+       * because the cell is merged across them.
+       *
+       * Not overwritten once set. A sheet that repeats the event name on later rows would
+       * otherwise replace a written trigger with the blank cell underneath it.
+       */
+      const trigger = readCell(cells, mapping.trigger);
+      if (trigger !== '' && !triggerByEvent.has(currentEvent)) {
+        triggerByEvent.set(currentEvent, trigger);
       }
     }
 
@@ -144,11 +158,14 @@ export function normalizeSheet(
 
   const events = new Map<string, EventSchema>();
   for (const [name, fields] of fieldsByEvent) {
+    const trigger = triggerByEvent.get(name);
     events.set(name, {
       name,
       fields,
       source: sourceByEvent.get(name) ?? 'unknown',
       mergeInto: mergeByEvent.get(name),
+      // Kept exactly as typed. Reading it into steps is a separate, later decision.
+      trigger: trigger === undefined ? undefined : { source: trigger },
     });
   }
 

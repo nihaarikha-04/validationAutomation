@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildMapping, detectColumns, normalizeHeader } from './detect-columns';
-import type { SheetGrid } from './types';
+import { COLUMN_ROLES, type ColumnRole, type SheetGrid } from './types';
 
 const CANONICAL: SheetGrid = [
   [
@@ -277,5 +277,81 @@ describe('header rows as real sheets write them', () => {
     ];
 
     expect(detectColumns(grid).headerRow).toBe(0);
+  });
+});
+
+/**
+ * The column where a client writes how an event is produced.
+ *
+ * A live sheet loaded with 17 events and no trigger column recognised at all — the symptom was
+ * every event showing nothing, which reads as "the sheet says nothing" rather than "the header was
+ * not one we knew". Spelled several ways in the wild, so the list is wide; a bare "action" and
+ * "steps" stay out because they collide with the event-name column's own synonyms.
+ */
+describe('the trigger condition column', () => {
+  function headerRow(trigger: string): SheetGrid {
+    return [
+      ['Event Name', 'Payload', 'Payload Data Type', trigger],
+      ['add_to_cart', 'product_id', 'String', 'Click Add to Cart'],
+    ];
+  }
+
+  it.each([
+    'Trigger Condition',
+    'Trigger Conditions',
+    'Trigger',
+    'Event Trigger',
+    'When to trigger',
+    'How to trigger',
+    'Steps to trigger',
+    'Trigger Description',
+    'User Journey',
+    'Scenario',
+    'trigger_condition',
+    'TRIGGER CONDITION',
+  ])('recognises "%s"', (header) => {
+    const detected = detectColumns(headerRow(header));
+
+    expect(detected.kind).toBe('resolved');
+    if (detected.kind !== 'resolved') return;
+    expect(detected.mapping.trigger).toBe(3);
+  });
+
+  it('leaves it unmapped when the sheet has no such column', () => {
+    const detected = detectColumns(headerRow('Example Value'));
+
+    expect(detected.kind).toBe('resolved');
+    if (detected.kind !== 'resolved') return;
+    expect(detected.mapping.trigger).toBeUndefined();
+  });
+});
+
+/**
+ * A guard against the way a new column role goes missing.
+ *
+ * `withOptionalRoles` builds the mapping by naming every role by hand. Adding `trigger` to
+ * `COLUMN_ROLES`, to the synonyms, to the candidate collector and to the mapping form was still
+ * not enough: that one hand-written list dropped it on the floor, so detection scored the column
+ * correctly and then threw the answer away. The symptom was a sheet loading with every event
+ * showing no trigger at all — an absence that reads as "the client wrote nothing".
+ *
+ * Fails for *any* role added to `COLUMN_ROLES` and not carried through, so the next one cannot
+ * repeat this.
+ */
+describe('every column role survives mapping', () => {
+  it('carries each role through buildMapping', () => {
+    const selection = Object.fromEntries(
+      COLUMN_ROLES.map((role, index) => [role, index]),
+    ) as Readonly<Partial<Record<ColumnRole, number>>>;
+
+    const built = buildMapping(selection);
+
+    expect(built.kind).toBe('ok');
+    if (built.kind !== 'ok') return;
+
+    const dropped = COLUMN_ROLES.filter(
+      (role) => built.mapping[role] !== selection[role],
+    );
+    expect(dropped).toEqual([]);
   });
 });

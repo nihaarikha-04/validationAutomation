@@ -1200,3 +1200,113 @@ The verdict rules, as decided while testing ethniq.com live:
 ### Working note for whoever runs this in Claude Code
 
 Feed one phase at a time. After each phase: build it, run the tests, check for TypeScript and extension errors in `chrome://extensions`, verify the exit criteria manually, and only then move to the next phase. Don't let it generate multiple phases' worth of code in one pass.
+
+---
+
+## Phase 8 (design Phase A) — Trigger Conditions read from the sheet, 2026-10-20
+
+Design: `docs/embedding-resolver-design.md`. Context and prior history: `docs/brief.md`.
+
+**Why this is first.** The design's embedding matcher cannot be Phase 1: a resolved element is
+useless until something can act on it, and on this branch the Trigger Condition column was not even
+read. This phase gets the client's sentence into the program and turns it into an ordered list of
+*intents*. It touches no DOM, no network and no model.
+
+- [x] **`trigger` column role.** Added to `COLUMN_ROLES`, `ColumnMapping`, `ColumnCandidates` and
+  the mapping form. Synonyms are led by "trigger condition", which is what the real sheets say; a
+  bare "action" and "steps" are deliberately excluded because they collide with `eventName`'s
+  "action name" and with other columns entirely.
+- [x] **`EventTrigger` carried on `EventSchema`**, taken from the row that names the event — the
+  same rule `source` follows, because the field rows beneath are blank where the cell is merged.
+  Not overwritten once set: a sheet repeating the event name later would otherwise replace a
+  written trigger with the blank cell under it. **Kept exactly as typed**, so a report can quote
+  the client rather than paraphrase them.
+- [x] **`subIntentsFrom`** — prose to an ordered list of `click | fill | select | navigate | ask`.
+  Pure. Every rule below came from a sentence in a real sheet:
+  - scene-setters dropped — "On a product detail page", "While logged in" describe circumstances,
+    and run as steps they click things that are not controls
+  - split on sentence ends, `;`, "then", numbered markers and commas, **never on a bare "and"**:
+    "select size and color" is one instruction and splitting it clicks the word "color"
+  - never split inside `e.g.` — doing so lost the value the sheet had already supplied
+  - trailing kind-nouns stripped: nothing is *called* "search icon"; it is called Search and has a
+    picture on it. A clause that is only a kind-noun yields nothing
+  - stop at an alternative ("press Enter **or click the search button**") and at a conditional
+    ("if one is required")
+  - a quoted phrase after a **click** names the control; after a **fill** it is the value
+  - personal details become an `ask` pause with a closed kind set, never an invented value
+- [x] **`press` and `enter` resolved by what follows**, not by the verb: "press Submit" is a click,
+  "press Enter" a keystroke; "Enter OTP" is a field, "Enter" a key.
+
+**Two bugs found by testing against the real column, both mine:**
+
+- `HIDDEN_DOT` was a **raw NUL byte in the source file** rather than the `'\u0000'` escape. It
+  worked, and it is the sort of thing that silently breaks an editor or a diff. Replaced.
+- `settle` asked `cleaned(after)` whether an object followed the verb. `cleaned` exists to leave a
+  *control's name* and splits on "/" to take the first of "the wishlist / heart icon" — so it
+  emptied the path in "Go to /refer-a-friend", which then read as a verb with nothing after it,
+  became a click, and was dropped. Whether an object follows is a fact about the sentence, not
+  about control names.
+
+**Exit criteria:** the real sheet's trigger column parsed into something runnable, and sentences
+that ask for nothing staying empty. **MET** — `real-sheet.test.ts` runs the Levison's column
+verbatim: every drivable event yields at least one intent with a non-empty target, Sign in pauses
+for both an email and an OTP, and the Shopify-webhook cell yields nothing at all.
+
+**Files:** `src/event-sheet/{types,detect-columns,normalize}.ts`, `src/event-sheet/sub-intents.ts`,
+`src/devtools/panel/components/ColumnMappingForm.tsx`, plus `sub-intents.test.ts` (24 cases) and
+`real-sheet.test.ts` (8).
+
+**Verified:** `npm run build` clean (`tsc --noEmit` included), `npx vitest run` **584 passing /
+31 files**. Manifest unchanged — still zero permissions, nothing on the network.
+
+**Deliberately not done here:** no intent is bound to an element, and `select`/`navigate` intents
+are produced but nothing executes them yet. That is Phase B (step representation, target
+resolution, executor, per-step safety gate). The embedding matcher is Phase C.
+
+### Phase 8.1 — showing the reading, 2026-10-20
+
+Phase A was pure logic with no way to see it, which is the trap this project has fallen into
+before: code that passes its tests and that the person using it cannot check.
+
+The reading of a trigger sentence is a **claim about the client's words**, and only a person can
+say whether it is right. The sheet view now shows, under each event, the client's sentence and the
+intents read out of it — side by side, so the two can be compared without leaving the panel.
+
+- [x] Read-only. Nothing here runs anything.
+- [x] **"Nothing was read" is said in words**, not shown as an empty space. That outcome is correct
+  for a webhook or an event that fires on its own, and wrong for a sentence that describes clicking
+  something — the reader is told which, rather than being left to interpret a gap.
+- [x] A pause is shown as a pause — *"ask the tester for their email"* — because it is the one
+  place a person is meant to step in, and it should not look like an ordinary step.
+- [x] Styling uses plain rgba borders and `opacity`, matching this stylesheet, which defines no
+  custom properties. Introducing a token set for one block would leave the file in two styles.
+
+**Files:** `src/devtools/panel/components/EventTree.tsx`, `panel.css`, `EventTree.test.tsx` (5).
+
+**Verified:** `npm run build` clean, `npx vitest run` **589 passing / 32 files**.
+
+### Phase 8.2 — the column was detected and then thrown away, 2026-10-20
+
+A live sheet loaded with 17 events and **not one trigger block**. The column had not been mapped.
+
+`withOptionalRoles` builds the resolved mapping by naming every role by hand. Adding `trigger` to
+`COLUMN_ROLES`, to the synonyms, to the candidate collector and to the mapping form was still not
+enough — that one list dropped it, so detection scored the column correctly and then discarded the
+answer on the way out.
+
+- [x] `withOptionalRoles` carries `trigger`.
+- [x] **A guard against the next one.** A test maps every role in `COLUMN_ROLES` to a distinct
+  column and asserts all of them survive `buildMapping`. It fails for *any* role added and not
+  carried through, so this cannot happen silently again.
+- [x] **The panel says when no trigger column was recognised**, and names the column when one was.
+  Without that the only symptom is every event showing nothing — an absence, which reads as "the
+  client wrote nothing about producing these" rather than "the column was never mapped". Two very
+  different things that looked identical, which is the failure shape this project keeps hitting.
+- [x] Synonyms widened, since the real header was being guessed at: trigger description, event
+  trigger, when/how to trigger, steps to trigger, steps to reproduce, user journey, scenario,
+  condition. A bare "action" and "steps" stay out — they collide with the event-name column.
+
+**Files:** `src/event-sheet/detect-columns.ts`, `detect-columns.test.ts` (13 new cases),
+`src/devtools/panel/App.tsx`.
+
+**Verified:** `npm run build` clean, `npx vitest run` **603 passing / 32 files**.

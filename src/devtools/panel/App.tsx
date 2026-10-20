@@ -242,6 +242,25 @@ export function App({
               Change columns
             </button>
           </p>
+
+          {/*
+            Said out loud when the trigger column was not found.
+            
+            Without this the only symptom is every event showing no trigger — an absence, which
+            reads as "the sheet says nothing about how to produce these" rather than as "the
+            column was never mapped". Two very different things that looked identical.
+          */}
+          {sheetState.mapping.trigger === undefined ? (
+            <p className="sheet__columns">
+              No <strong>Trigger Condition</strong> column was recognised, so nothing the client
+              wrote about producing these events is being read. If the sheet has one under another
+              name, map it with <em>Change columns</em>.
+            </p>
+          ) : (
+            <p className="sheet__columns">
+              Reading <code>{columnLabel(sheetState, 'trigger')}</code> as the trigger condition.
+            </p>
+          )}
           <EventTree sheet={sheetState.sheet} />
         </>
       ) : null}
@@ -302,7 +321,7 @@ async function readGrid(file: File): Promise<SheetGrid> {
 /** The header text of the column a role is reading, for the line that states the mapping. */
 function columnLabel(
   state: { readonly headers: readonly string[]; readonly mapping: ColumnMapping },
-  role: 'eventName' | 'payloadName',
+  role: 'eventName' | 'payloadName' | 'trigger',
 ): string {
   const column = state.mapping[role];
   if (column === undefined) {

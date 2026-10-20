@@ -12,6 +12,7 @@ export const COLUMN_ROLES = [
   'description',
   'example',
   'source',
+  'trigger',
 ] as const;
 
 export type ColumnRole = (typeof COLUMN_ROLES)[number];
@@ -35,6 +36,7 @@ export interface ColumnMapping {
   readonly description?: number;
   readonly example?: number;
   readonly source?: number;
+  readonly trigger?: number;
 }
 
 export type ColumnCandidates = Readonly<Record<ColumnRole, readonly number[]>>;
@@ -91,10 +93,26 @@ export interface FieldSchema {
  */
 export type EventSource = 'frontend' | 'api' | 'unknown';
 
+/**
+ * What the sheet says, in words, about how an event is produced.
+ *
+ * Every real sheet seen so far writes this as prose rather than as steps — *"Click the search icon
+ * in the header, type a keyword (e.g. 'jacket'), then press Enter"*. That is an instruction, and
+ * it is the **only** description of the action anybody has written down. Kept exactly as typed:
+ * reading it into steps is a later, separate decision, and the client's own words have to survive
+ * so a report can quote them.
+ */
+export interface EventTrigger {
+  /** The cell exactly as the sheet holds it. */
+  readonly source: string;
+}
+
 export interface EventSchema {
   readonly name: string;
   readonly fields: readonly FieldSchema[];
   readonly source: EventSource;
+  /** Absent when the sheet has no trigger column, or none for this event. */
+  readonly trigger?: EventTrigger;
   /**
    * The event this one was folded into, exactly as the sheet spelled it, when the sheet says it
    * must not fire separately.

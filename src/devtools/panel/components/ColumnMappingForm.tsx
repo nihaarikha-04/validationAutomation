@@ -18,6 +18,7 @@ const ROLE_LABELS: Readonly<Record<ColumnRole, string>> = {
   description: 'Description',
   example: 'Example value',
   source: 'Source (frontend / API)',
+  trigger: 'Trigger condition',
 };
 
 const NO_COLUMN = '';
