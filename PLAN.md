@@ -1310,3 +1310,53 @@ answer on the way out.
 `src/devtools/panel/App.tsx`.
 
 **Verified:** `npm run build` clean, `npx vitest run` **603 passing / 32 files**.
+
+---
+
+## Phase 9 (design Phase B1) — Finding the control a sentence names, 2026-10-20
+
+Phase A produced intents in the client's words. This is where a sentence meets a document, and it
+is the single place most likely to be wrong — so it is also where the embedding matcher of design
+Phase C will later slot in, behind the same call.
+
+- [x] **`resolveTarget`** — a named target to one element. Exact match first, containment only if
+  nothing matched exactly: a page carrying both "Apply" and "Apply for a loan" otherwise makes
+  every containment match ambiguous and neither targetable.
+- [x] **All the ways a page names a control** — `aria-label`, an associated or wrapping `<label>`,
+  placeholder, title, value, name, and the element's **own** text. Own text rather than
+  `textContent`, because a card wrapping a button reads as everything inside it, matches nothing,
+  and makes both the card and the button candidates for the same words. A control the sheet calls
+  "the search icon" has no visible words at all; its `aria-label` is the only thing naming it.
+- [x] **A `<label>` is never a target.** Its whole job is to name a different element, so it
+  competes with the field it labels and would make every labelled field ambiguous.
+- [x] **Three narrowing rules**, each a fact about the elements rather than a preference, so none
+  can pick a wrong one where a right one exists: a control beats a wrapper that describes one; the
+  innermost of nested matches wins; it has to occupy space. The third is the responsive case — a
+  mobile header and a desktop header in one document, where `display` and `visibility` see nothing
+  and a measurement does. It skips itself when *nothing* has a size, because every element in a
+  headless DOM measures 0×0.
+- [x] **Still ambiguous stays ambiguous**, named with tags — `button "search"`, `div "search"`.
+  Two interchangeable controls are a question for a person; picking one silently is how a run
+  clicks the wrong thing. Three identical-looking words could not say why they competed.
+- [x] **`resolve` command**, asked of every frame. Separating *where is it* from *act on it* is
+  what lets a step work inside an iframe without a second execution path.
+- [x] **`checkSteps`** reconciles the frames' answers. **Two frames each finding one match is still
+  ambiguous** — a quick-view panel duplicating a control from the page behind it looks
+  unambiguous to each document and is not.
+- [x] **Visible in the panel**: *"Is this on the page now?"* under each event. Nothing is clicked.
+  A pause reports as *waits for you* and an address as *an address, not a control*, because
+  neither was ever going to be found and both would otherwise read as a missing control.
+
+**Why the check matters beyond convenience.** It answers, per site, the one question that decides
+whether design Phase C is worth building: **how many targets are found by name alone.** That is a
+measurement rather than a guess, and it can be taken before writing an executor.
+
+**Files:** `src/automation/{find-target,check-steps}.ts` (+ tests, 32 cases), `commands.ts`,
+`src/content/bridge.ts`, `src/devtools/panel/components/EventTree.tsx` (+ 3 tests),
+`App.tsx`, `panel.css`.
+
+**Verified:** `npm run build` clean, `npx vitest run` **638 passing / 34 files**. Manifest
+unchanged — zero permissions, nothing on the network.
+
+**Not done:** nothing executes yet. Clicking, filling, the pause and the per-step safety gate are
+Phase B2.

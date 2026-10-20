@@ -261,7 +261,7 @@ export function App({
               Reading <code>{columnLabel(sheetState, 'trigger')}</code> as the trigger condition.
             </p>
           )}
-          <EventTree sheet={sheetState.sheet} />
+          <EventTree sheet={sheetState.sheet} driver={driver} />
         </>
       ) : null}
 

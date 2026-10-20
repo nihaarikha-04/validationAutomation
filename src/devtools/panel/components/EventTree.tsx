@@ -1,12 +1,22 @@
+import { useState } from 'react';
+import { checkSteps, type CheckedStep } from '../../../automation/check-steps';
+import type { PageDriver } from '../../../automation/commands';
 import { fieldIdentity } from '../../../event-sheet/normalize';
 import { subIntentsFrom, type SubIntent } from '../../../event-sheet/sub-intents';
 import type { EventSheet } from '../../../event-sheet/types';
 
 export interface EventTreeProps {
   readonly sheet: EventSheet;
+  /**
+   * Drives the inspected page, so the steps read from a sentence can be checked against it.
+   *
+   * Optional because the tree is also rendered where no page is being driven, and a sheet is
+   * worth reading without one.
+   */
+  readonly driver?: PageDriver;
 }
 
-export function EventTree({ sheet }: EventTreeProps) {
+export function EventTree({ sheet, driver }: EventTreeProps) {
   const events = [...sheet.events.values()];
 
   return (
@@ -41,7 +51,7 @@ export function EventTree({ sheet }: EventTreeProps) {
                 </summary>
 
                 {event.trigger === undefined ? null : (
-                  <Trigger prose={event.trigger.source} />
+                  <Trigger prose={event.trigger.source} driver={driver} />
                 )}
                 <table className="tree__table">
                   <thead>
@@ -84,8 +94,28 @@ export function EventTree({ sheet }: EventTreeProps) {
  *
  * Read-only. Nothing here runs anything.
  */
-function Trigger({ prose }: { readonly prose: string }) {
+function Trigger({
+  prose,
+  driver,
+}: {
+  readonly prose: string;
+  readonly driver: PageDriver | undefined;
+}) {
   const intents = subIntentsFrom(prose);
+  const [checked, setChecked] = useState<readonly CheckedStep[] | undefined>(undefined);
+  const [checking, setChecking] = useState(false);
+
+  const check = async (): Promise<void> => {
+    if (driver === undefined) {
+      return;
+    }
+    setChecking(true);
+    try {
+      setChecked(await checkSteps(intents, driver));
+    } finally {
+      setChecking(false);
+    }
+  };
 
   return (
     <div className="tree__trigger">
@@ -98,14 +128,29 @@ function Trigger({ prose }: { readonly prose: string }) {
           latter, the sentence is worth passing on.
         </p>
       ) : (
-        <ol className="tree__intents">
-          {intents.map((intent, index) => (
-            <li key={`${index}-${intent.source}`}>
-              <span className="tree__kind">{intent.kind}</span>
-              <code>{describe(intent)}</code>
-            </li>
-          ))}
-        </ol>
+        <>
+          <ol className="tree__intents">
+            {intents.map((intent, index) => (
+              <li key={`${index}-${intent.source}`}>
+                <span className="tree__kind">{intent.kind}</span>
+                <code>{describe(intent)}</code>
+                {checked === undefined ? null : <Outcome step={checked[index]} />}
+              </li>
+            ))}
+          </ol>
+
+          {driver === undefined ? null : (
+            <div>
+              <button type="button" disabled={checking} onClick={() => void check()}>
+                {checking ? 'Looking…' : 'Is this on the page now?'}
+              </button>
+              {' '}
+              <span className="tree__none">
+                Looks for each control on the page as it is right now. Nothing is clicked.
+              </span>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -122,5 +167,44 @@ function describe(intent: SubIntent): string {
       return intent.value ?? intent.target;
     default:
       return intent.target;
+  }
+}
+
+/**
+ * What the page said about one step's control.
+ *
+ * Each outcome is a different thing and none of them is "it failed": a control that is not here
+ * may simply belong to a later screen, and a pause was never going to be on the page at all.
+ */
+function Outcome({ step }: { readonly step: CheckedStep | undefined }) {
+  if (step === undefined) {
+    return null;
+  }
+
+  switch (step.check.kind) {
+    case 'here':
+      return (
+        <span className="tree__here">
+          found{step.check.frameId === 0 ? '' : ` in a frame`} — &ldquo;{step.check.label}&rdquo;
+        </span>
+      );
+    case 'missing':
+      return <span className="tree__gone">not on this page</span>;
+    case 'no-answer':
+      return (
+        <span className="tree__gone">
+          the page did not answer ({step.check.detail}) — reload the page, then try again
+        </span>
+      );
+    case 'ambiguous':
+      return (
+        <span className="tree__gone">
+          {step.check.count} matches ({step.check.describing.join(', ')})
+        </span>
+      );
+    case 'asks':
+      return <span className="tree__none">waits for you</span>;
+    case 'not-a-control':
+      return <span className="tree__none">an address, not a control</span>;
   }
 }

@@ -1,5 +1,6 @@
 import type { Clickable } from './sweep';
 import type { ActionCandidate, ActionTarget } from './types';
+import type { TargetResolution } from './find-target';
 
 /**
  * The panel↔page protocol for automation. Kept in its own module so neither side has to import
@@ -27,7 +28,15 @@ export type AutomationCommand =
   | { readonly kind: 'announce' }
   | { readonly kind: 'form-needs'; readonly selector: string }
   | { readonly kind: 'location' }
-  | { readonly kind: 'navigate'; readonly url: string };
+  | { readonly kind: 'navigate'; readonly url: string }
+  /**
+   * Where the control a sub-intent names is, if it is in this frame.
+   *
+   * Deliberately separate from acting on it: asking every frame where a target is, and only then
+   * telling the frame that answered to act, is what lets a step work inside an iframe without a
+   * second execution path.
+   */
+  | { readonly kind: 'resolve'; readonly wanted: string };
 
 export type AutomationReply =
   | {
@@ -58,6 +67,7 @@ export type AutomationReply =
       /** Frames we could not see into, so coverage gaps are reported rather than silent. */
       readonly unreachableFrames?: number;
     }
+  | { readonly kind: 'resolved'; readonly resolution: TargetResolution }
   | { readonly kind: 'error'; readonly message: string };
 
 export interface FrameReply {

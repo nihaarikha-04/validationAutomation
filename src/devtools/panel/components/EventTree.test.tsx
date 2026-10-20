@@ -1,7 +1,8 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { EventTree } from './EventTree';
 import type { EventSchema, EventSheet } from '../../../event-sheet/types';
+import type { AutomationReply, PageDriver } from '../../../automation/commands';
 
 function sheetWith(trigger: string | undefined): EventSheet {
   const event: EventSchema = {
@@ -68,5 +69,56 @@ describe('the trigger condition in the sheet view', () => {
     render(<EventTree sheet={sheetWith(undefined)} />);
 
     expect(screen.queryByText(/Nothing to do was read/)).toBeNull();
+  });
+});
+
+/**
+ * Checking the steps against the page as it is now.
+ *
+ * The step that comes out of a client's sentence is a *claim* — "there is something here called
+ * search" — and the cheapest moment to find out it is wrong is before a run rather than halfway
+ * through one. Nothing is clicked.
+ */
+describe('checking a trigger against the page', () => {
+  const PROSE = "Click the search icon, then click 'Logout'.";
+
+  function driverSaying(replies: readonly AutomationReply[]): PageDriver {
+    const remaining = [...replies];
+    return { send: () => Promise.resolve(remaining.shift() ?? { kind: 'error', message: 'x' }) };
+  }
+
+  const FOUND: AutomationReply = {
+    kind: 'resolved',
+    resolution: { kind: 'found', match: { selector: '#s', label: 'Search', risk: 'safe' } },
+  };
+  const NONE: AutomationReply = { kind: 'resolved', resolution: { kind: 'none' } };
+
+  it('offers the check only when a page is being driven', () => {
+    render(<EventTree sheet={sheetWith(PROSE)} />);
+
+    expect(screen.queryByRole('button', { name: /on the page now/ })).toBeNull();
+  });
+
+  it('says which controls are there and which are not', async () => {
+    render(<EventTree sheet={sheetWith(PROSE)} driver={driverSaying([FOUND, NONE])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /on the page now/ }));
+
+    expect(await screen.findByText(/found/)).toBeInTheDocument();
+    expect(await screen.findByText('not on this page')).toBeInTheDocument();
+  });
+
+  /** A pause was never going to be on the page, and must not read as a missing control. */
+  it('does not report a pause as missing', async () => {
+    render(
+      <EventTree
+        sheet={sheetWith('Enter the registered Email, then click Login.')}
+        driver={driverSaying([FOUND])}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /on the page now/ }));
+
+    expect(await screen.findByText('waits for you')).toBeInTheDocument();
   });
 });

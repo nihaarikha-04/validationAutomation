@@ -1,4 +1,5 @@
 import { detectAction, rank } from '../automation/detect-action';
+import { resolveTarget } from '../automation/find-target';
 import { detectPlatform, findByPlatform } from '../automation/platforms/adapters';
 import { selectorFor } from '../automation/selector';
 import { formNeeds } from '../automation/fill';
@@ -101,6 +102,11 @@ chrome.runtime.onMessage.addListener(
         startPicking(sendResponse);
         // The reply comes when the user clicks, so the channel stays open.
         return true;
+
+      case 'resolve': {
+        sendResponse({ kind: 'resolved', resolution: resolveTarget(document, command.wanted) });
+        return false;
+      }
 
       case 'dismiss': {
         // Overlays opened by a previous click sit over everything else. Escape is what a user

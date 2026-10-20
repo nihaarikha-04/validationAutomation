@@ -678,3 +678,12 @@ body {
   opacity: 0.7;
   font-size: 11px;
 }
+
+/* What the page said about a step's control. Three outcomes, none of them "it failed". */
+.tree__here {
+  color: #137333;
+}
+
+.tree__gone {
+  color: #a15c00;
+}
