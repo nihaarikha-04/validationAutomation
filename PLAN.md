@@ -1360,3 +1360,245 @@ unchanged — zero permissions, nothing on the network.
 
 **Not done:** nothing executes yet. Clicking, filling, the pause and the per-step safety gate are
 Phase B2.
+
+---
+
+## Phase 10 — Sweep run log, before the circuit breaker, 2026-10-31
+
+A live sweep on levisons.co.za kept clicking while a "Remove Item" dialog sat over the page, and
+13 of 15 reachable events came back *not triggered*. Three suspicions, none confirmed:
+
+1. `element.click()` fires on a control even when a dialog is drawn over it, so the sweep "clicks"
+   the page behind an open modal and nothing a visitor could do happens.
+2. The dialog lives in a frame the content script never reached.
+3. "Carry on automatically when the page changes" restarts a sweep from scratch, memory wiped, on
+   every navigation — a loop by itself.
+
+Per the project rule, make the failure say what it saw before changing behaviour. **This phase
+changes nothing about what is clicked or when a run stops.** The circuit breaker and a `BLOCKED`
+report status follow once the log has been read from a live run.
+
+- [x] **`hitAt`** (`sweep.ts`) — what a real pointer would have hit at the control's centre:
+  `self`, `covered` (naming the element and whether it is in a dialog), `off-screen`, or
+  `unmeasured`. Measured immediately before the click, inside `clickVisibly`: earlier the smooth
+  scroll is still moving the element; afterwards the click may have changed the page.
+- [x] **`clicked` reply carries the hit.** Optional on the protocol, because the targeted runner
+  and test fakes do not measure it, and the log says *not measured* rather than inventing one.
+- [x] **`TraceEntry` + `traceLine`** (`trace.ts`, pure) — one entry per sweep start (button vs
+  automatic restart), per listing (controls, frames, how many in an overlay, candidates left, and
+  whether the page is **unchanged since last round**), per click (frame, overlay, hit, events
+  fired, URL), per click that did not land (`not-found`, `error: …`), per Escape dismissal, and
+  per sweep end with the reason.
+- [x] **`onTrace` on `SweepDeps`**, required, wired at the panel. `crawlSite` logs each page's
+  end; the panel logs a single-page sweep's.
+- [x] **Panel: "Run log (N lines)"** with **Download log** (`sweep-log.txt`, through the existing
+  `onExport`). Kept across automatic restarts and cleared only by the button, so a sweep that keeps
+  starting itself over shows as repeated `restarted on its own` lines.
+
+**Files:** `src/automation/{sweep,commands,crawl,trace}.ts`, `src/content/bridge.ts`,
+`src/devtools/panel/components/PageSweep.tsx`, `panel.css`; tests `trace.test.ts` (5),
+`sweep.test.ts` (+3 `hitAt`), `crawl.test.ts` (+1 log sequence).
+
+**Verified:** `tsc --noEmit` clean, `npm run build` clean, `npx vitest run` **650 passing / 36
+files**. Manifest unchanged.
+
+**Not verified yet — the exit criterion:** a live sweep on levisons.co.za reproducing the stuck
+dialog, with the downloaded log read. It should say which of the three suspicions holds:
+`COVERED by …` lines → (1); the dialog's controls never listed and `1 frame` throughout → (2);
+repeated `restarted on its own` → (3). Only then is the circuit breaker built.
+
+**Deferred:** circuit breaker with N stalls, covered-click refusal, `match_origin_as_fallback`,
+`BLOCKED` report status — all planned, all waiting on the log.
+
+Correction to `docs/brief.md` §7: levisons.co.za is **not** a Shopify site (per the tester,
+2026-10-31). The tool targets plain-JS, Shopify, Magento, GTM and API integrations alike.
+
+### Phase 10 — verified against a live run, 2026-10-31
+
+The log was read from a live sweep of levisons.co.za/cart/bag. Of the three suspicions:
+
+- **(1) confirmed.** After "open navigation" the menu stayed open and later clicks reported
+  `COVERED by li "Women"` / `nav "WomenMenKidsBrandsSale"`. Each cart row's X (no text, logged as
+  `"button"`) opened the "Remove Item" dialog — the overlay count jumped 18 → 83 — and the next
+  click went *behind* the dialog rather than to its buttons.
+- **(2) ruled out.** `1 frame` on every round; no iframe was involved.
+- **(3) ruled out.** One automatic restart, and it was legitimate.
+
+Four further findings: a first sweep where no frame answered was reported as an empty page
+(`0 controls in 0 frames`); zero-size controls (a hidden header's "My Wishlist", "Profile") were
+clicked; the fixed-ancestor overlay test marks **every** control as an overlay once a site locks
+scrolling (`83 in an overlay`); and the log's own "page unchanged" ignored reachability, so it
+said *unchanged* while a dialog opened. Six rounds listed without a click — the unlogged
+"form would submit empty → Skip" path.
+
+---
+
+## Phase 11 — Press only what a visitor could press; stop when stuck, 2026-10-31
+
+Built on the Phase 10 log. Detection uses only web-platform facts — hit-testing, size, ARIA — so
+it holds for plain-JS, Shopify, Magento, GTM and API integrations alike.
+
+- [x] **Reach measured per control at listing time** (`Clickable.reach`, from `hitAt`). Two new
+  kinds: `no-size` (split out of `unmeasured`) and `decoration` — something on top that shares
+  the control's parent or grandparent, like a cart row's X icon drawn as a sibling over its
+  button. A menu or dialog from elsewhere in the page is still `covered`.
+- [x] **The bridge refuses a click a visitor could not make** (`covered` or `no-size`), replying
+  `unclickable` with what was on top. Scroll changed to instant so the measurement is taken where
+  the click lands; a smooth scroll measured mid-flight could refuse a fine click under a fixed
+  header. The single-event runner's failure now names the blocker.
+- [x] **The sweep skips covered and zero-size controls** and prefers controls on screen now. With
+  a dialog open, that is the dialog's own buttons. Zero size is ignored when *nothing* has a size,
+  as in a headless DOM.
+- [x] **A refused control is not spent.** It is set aside until the page changes, then offered
+  again — closing the dialog over it makes it as worth clicking as ever.
+- [x] **Circuit breaker.** A stall is a click that did not land, or one that fired nothing and
+  left the page — including what is reachable — unchanged. Any event or page change resets it.
+  At `maxStalls` (5, set in the panel): press Escape; at 5 more, click again the control whose
+  click last increased the covered count (a menu toggle); at 5 more, stop with the reason and the
+  last refused click. The nothing-left-to-click path uses the same steps, and when covered
+  controls remain it stops saying how many and what covers them, instead of ending quietly.
+- [x] **Log:** `listed` carries covered count and stall count, and its change signal includes
+  reachability; `missed` carries the refusal; new `asked` (the tester's Skip/continue/stop on an
+  empty form) and `recovering` (Escape or toggle) entries.
+
+**Files:** `src/automation/{sweep,commands,crawl,trace}.ts`, `src/content/bridge.ts`,
+`src/devtools/panel/components/{PageSweep,TestRunner}.tsx`; tests `sweep.test.ts` (+2),
+`crawl.test.ts` (+6 stall-limit cases), `trace.test.ts` (updated).
+
+**Changed an existing test, with reason:** *spends only its click budget on each page* clicks 40
+controls that fire nothing on a page that never changes — exactly what the breaker stops. The
+test is about the budget, so it raises `maxStalls`.
+
+**Verified:** `tsc --noEmit` clean, `npm run build` clean, `npx vitest run` **658 passing / 36
+files**. Manifest unchanged.
+
+**Not verified yet — exit criterion:** a live sweep of the Levison's cart with the "Remove Item"
+dialog. Expected in the log: dialog buttons clicked first after an X, no `COVERED` clicks, and a
+stuck run ending with a `recovering` sequence and a named blocker rather than clicking on.
+
+**Risk to watch in that run:** a page of genuinely inert controls — ones that fire nothing and
+change nothing a listing can see — now ends after about 15 such clicks in a row. If live logs
+show coverage lost that way, the change signal needs more than control identity and reach.
+
+**Deferred:** the `BLOCKED` report status (Phase 12), "no frame answered" as its own stop reason,
+the fixed-ancestor overlay test, `match_origin_as_fallback` (no iframe has been implicated).
+
+### Phase 11.1 — the dialog's buttons never reached the listing, 2026-10-31
+
+Live log on the Levison's cart: after the X, `83 controls` before **and** after the "Remove Item"
+dialog opened. Its REMOVE, MOVE TO WISHLIST and close button never entered the listing, so no
+ordering could have chosen them. The tester reports the dialog is an iframe.
+
+**Correction to Phase 10's verification:** "(2) ruled out — 1 frame on every round" was wrong.
+That count is frames that *answered*, and a frame our script never loads in cannot answer.
+
+Two further defects in the same log: rounds 8 and 10 clicked `"button"` reported `off-screen when
+clicked` — the dialog locks scrolling, `scrollIntoView` could not move it, and the click went to
+the page behind; and three different "Save" links each raised the empty-form prompt (deferred).
+
+- [x] **`match_origin_as_fallback: true`** on both content scripts — `about:blank`, `srcdoc`,
+  `blob:` and `data:` frames now get the bridge and the debug capture, and announce themselves.
+  No new permission. Manifest test asserts it.
+- [x] **Frame inventory in the log** (`describeFrames`, `controlsInShadow`; `frames` trace
+  entry): every `<iframe>` element with its source, size and whether it is readable from the page,
+  plus controls inside open shadow roots — which look like a nested document in the Elements panel
+  and are just as invisible to the listing. Logged on the first round and whenever it changes.
+- [x] **Off-screen after scrolling is refused** (`blocksClick`).
+- [x] **`listed` names what covers controls**, up to three distinct blockers.
+
+**Files:** `public/manifest.json`, `src/automation/{sweep,commands,crawl,trace}.ts`,
+`src/content/bridge.ts`, `TestRunner.tsx`; tests `manifest.test.ts`, `sweep.test.ts` (+4),
+`trace.test.ts` (+1), `crawl.test.ts` (sequence updated).
+
+**Verified:** `tsc --noEmit` clean, `npm run build` clean, `npx vitest run` **662 passing / 36
+files**.
+
+**Not verified — exit criterion:** the same cart run, whose `frames` line after the X says which
+case it is: a new frame that now answers (fixed by the manifest), `NOT readable — other origin`
+with `1 answered` (the frame's own content script is not reaching the panel — next fix is there),
+or shadow-DOM controls (next fix is piercing open shadow roots).
+
+**Deferred:** prompting once per kind of control after Skip, not once per control.
+
+### Phase 11.2 — the dialog was bare divs, not an iframe, 2026-10-31
+
+**Correction to Phase 11.1:** the tester inspected the "Remove Item" dialog. It is in the top
+document — no iframe, no shadow root. REMOVE, MOVE TO WISHLIST and the close X are plain `<div>`s
+with handlers attached by script, and the container has no `role="dialog"`. The site is on
+**Fynd** (`cdn.fynd.com`). Phase 11.1's manifest change and frame inventory stay — they close a
+real gap and make the next frame question answerable from the log — but they were not this cause.
+
+```html
+<div class="V2ufu"><svg …/></div>          <!-- close X: no text, no label -->
+<div class="wWPBB">REMOVE</div>
+<div class="Iwkzi">MOVE TO WISHLIST</div>
+```
+
+- [x] **`scriptedControls`** — elements a visitor is shown as clickable by the **pointer cursor**,
+  added to the listing. Listeners are invisible to a content script; the cursor is the signal the
+  site gives its own visitors, on any framework. Only where the pointer starts (it is inherited,
+  so a card's children all report it), and never in or around a real control.
+- [x] **An icon-only control inside an overlay dismisses it** — no text, no aria-label, no title,
+  an `svg`/`img` inside. It goes last, so the dialog's own actions are tried before it is closed.
+
+**Files:** `src/automation/sweep.ts`, `sweep.test.ts` (+4, built from the served dialog markup).
+
+**Verified:** `tsc --noEmit` clean, `npm run build` clean, `npx vitest run` **666 passing / 36
+files**.
+
+**Not verified — exit criterion:** the cart run again. After an X, the listing should grow past
+83, and the next click should be REMOVE or MOVE TO WISHLIST rather than anything behind it.
+
+**Risks to watch:** more candidates per page (clickable cards and images now count), and the
+computed-style pass over every element costs time per round on very large pages. Icon-only
+controls in a fixed header count as overlay dismissers and go late in a sweep.
+
+### Phase 11.2 — verified against a live run, 2026-10-31
+
+The cart log after 11.2: `#19 click "REMOVE" → fired: remove from cart, cart items` and
+`#21 click "MOVE TO WISHLIST" → fired: add to wishlist`. Both events had never been produced by a
+sweep. The dialog's script-only `<div>` buttons are listed and pressed before its X. **Met.**
+
+The same run surfaced two more things, handled below and left open respectively.
+
+---
+
+### Phase 11.3 — progress means something new, and the log reads the page's messages, 2026-10-31
+
+**The loop.** Rounds 5–14: a quick view stayed open and the sweep re-tried the off-screen header
+controls — "open navigation" refused at 5, 7, 10, 11 and 14 — without the breaker ever tripping.
+The listing blinked between 517 and 518 controls (a toast or the carousel), every blink read as
+"page changed", and that reset the stall count and released every refused control.
+
+- [x] **Progress is now a kind of control not seen before in this sweep, or the page going from
+  covered to fully uncovered**, plus any event fired. A control blinking in and out, or moving in
+  and out of reach, is not. Kinds by `stableKey`, because a re-rendered toast gets a fresh element
+  id each time. Only real progress releases refused controls and resets the stall count.
+- [x] **Regression test from the live shape:** an open overlay, two off-screen controls, a toast
+  present every other round. Each control is tried once (plus one retry on the toast's genuinely
+  new first appearance), then the sweep stops naming what covers the page.
+- [x] **Fixture corrected:** *comes back to a refused control* had a dialog that covered nothing,
+  which no real dialog does. It now reports the page behind as covered while open.
+
+**Add to Cart that fired nothing.** `#3 click "Add to Cart" [overlay] → reached it · fired:
+nothing`, in the quick view after "Select Black"; no event in the following rounds either. The
+listing gained one element right after, and the cart page lists several items as "Unavailable".
+Whether this is the site (product not addable) or the tool (the click or the 1.2 s wait) is
+**not known** — the tester is checking by hand.
+
+- [x] **`noticesIn`** — the text of ARIA alert, status and live regions, and of elements whose
+  class names a toast, snackbar or notification; innermost only, visible only, at most 120
+  characters. `listed` logs messages that are new since last round as `page says: "…"`.
+
+**Files:** `src/automation/{sweep,commands,crawl,trace}.ts`, `src/content/bridge.ts`; tests
+`crawl.test.ts` (+2, 1 fixture corrected), `sweep.test.ts` (+2), `trace.test.ts` (updated).
+
+**Verified:** `tsc --noEmit` clean, `npm run build` clean, `npx vitest run` **670 passing / 36
+files**.
+
+**Not verified — exit criteria:** a live run where (a) an open quick view no longer causes
+repeated refusals of the same header control, and (b) the line after the quick view's Add to Cart
+says what the page showed, if it showed anything.
+
+**Note for whoever runs tests here:** macOS has no `timeout`; a hung run was misdiagnosed for a
+round because `timeout 25 npx vitest …` failed silently. Use `perl -e 'alarm N; exec @ARGV' …`.

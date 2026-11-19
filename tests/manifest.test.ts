@@ -48,6 +48,9 @@ describe('manifest.json', () => {
       // Controls live inside iframes — payment widgets especially — and a top-frame-only
       // injection cannot see or click any of them.
       expect(entry['all_frames']).toBe(true);
+      // Frames with no URL of their own — about:blank, srcdoc, blob: — get no content script
+      // without this, never announce themselves, and a dialog built in one was invisible.
+      expect(entry['match_origin_as_fallback']).toBe(true);
     }
   });
 

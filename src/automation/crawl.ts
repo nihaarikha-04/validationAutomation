@@ -1,6 +1,7 @@
 import type { AutomationReply, KnownFrame, PageDriver } from './commands';
 import type { CapturedPayload } from '../shared/payload';
-import type { Clickable, ClickRisk } from './sweep';
+import type { Clickable, ClickHit, ClickRisk } from './sweep';
+import type { ListingChange, TraceEntry } from './trace';
 import { urlShape } from './url-shape';
 
 /** A control plus the frame it lives in, so the click goes back to the right document. */
@@ -61,6 +62,14 @@ export interface SweepDeps {
   /** Payloads captured at or after the given moment. Injected so this stays testable. */
   readonly payloadsSince: (from: number) => readonly CapturedPayload[];
   readonly onProgress: (message: string) => void;
+  /** Receives the run log, one entry per listing, click and recovery step. */
+  readonly onTrace: (entry: TraceEntry) => void;
+  /**
+   * Rounds in a row that achieve nothing before the sweep tries to uncover the page, and after
+   * each recovery step, before it gives up. Without it a sweep behind an open dialog clicks for
+   * as long as there are controls left.
+   */
+  readonly maxStalls: number;
   readonly allowed: (risk: ClickRisk) => boolean;
   /** Animate a pointer to each element before clicking it, so the run can be watched. */
   readonly showPointer: boolean;
@@ -187,8 +196,52 @@ export async function sweepPage(
   let unreachableFrames = 0;
   let framesSeen = 1;
   let frames: readonly KnownFrame[] = [];
-  /** Whether the last thing we did was close an overlay, so we do not loop closing nothing. */
-  let justDismissed = false;
+  /**
+   * Rounds in a row that achieved nothing: a click that did not land, or one that fired nothing
+   * and left the page exactly as it was. Any event or any change to the page resets it.
+   */
+  let stalls = 0;
+  /** A click fired nothing; whether it changed the page is only known at the next listing. */
+  let awaitingEffect = false;
+  /** Recovery steps spent since the last progress — see `recover`. */
+  let recoveries = 0;
+  /** The control whose click last left more of the page covered: a menu toggle, a dialog's X. */
+  let opener: FrameClickable | undefined;
+  let coveredBefore = 0;
+  let lastClicked: FrameClickable | undefined;
+  /** What last refused a click, so a stop can say what was in the way. */
+  let lastBlocker: string | undefined;
+  /**
+   * Refused controls, skipped until the page changes. Not spent: once the dialog over them
+   * closes they are as worth clicking as ever, so they must not count as done.
+   */
+  const refused = new Set<string>();
+  /** Every kind of control listed so far, so a round can tell new content from the same content redrawn. */
+  const seenKinds = new Set<string>();
+
+  /**
+   * Tries to uncover the page, one step per call: Escape first, then clicking whatever opened
+   * the covering thing a second time — a menu that ignores Escape usually closes on its toggle.
+   * Says whether there was a step left to try.
+   */
+  const recover = async (round: number): Promise<boolean> => {
+    if (recoveries === 0) {
+      recoveries = 1;
+      deps.onTrace({ kind: 'recovering', round, how: 'escape' });
+      await deps.driver.send({ kind: 'dismiss' });
+      return true;
+    }
+    if (recoveries === 1 && opener !== undefined) {
+      recoveries = 2;
+      deps.onTrace({ kind: 'recovering', round, how: 'toggle', label: opener.label });
+      const command = { kind: 'click' as const, selector: opener.selector, show: deps.showPointer };
+      await (deps.driver.sendTo === undefined
+        ? deps.driver.send(command)
+        : deps.driver.sendTo(opener.frameId, command));
+      return true;
+    }
+    return false;
+  };
 
   /**
    * Whether another control of this kind is still worth clicking.
@@ -228,6 +281,13 @@ export async function sweepPage(
   const opened = await deps.driver.send({ kind: 'location' });
   const startedIn = opened.kind === 'location' ? opened.stamp : undefined;
   const startedUrl = opened.kind === 'location' ? opened.url : undefined;
+  deps.onTrace({ kind: 'sweep', url: startedUrl });
+  /** Every listed control, so a round can say whether the page moved since the last one. */
+  let lastListing: string | undefined;
+  /** What the page was saying last round, so only something newly said is logged. */
+  let lastNotices: ReadonlySet<string> = new Set();
+  /** The frame inventory last logged, so it is logged again only when it changes. */
+  let lastFrames: string | undefined;
 
   // Keep anything a click opens inside the tab DevTools is attached to; otherwise it lands in a
   // tab we cannot see and the sweep appears to stop for no reason.
@@ -277,16 +337,110 @@ export async function sweepPage(
     framesSeen = Math.max(framesSeen, listing.framesSeen);
     frames = deps.driver.knownFrames?.() ?? [];
 
+    // Only the top frame describes the frame elements, so a frame that never answers still shows.
+    const frameNotes = {
+      iframes: listed.iframes ?? [],
+      shadowControls: listed.shadowControls ?? 0,
+    };
+    const framesNow = JSON.stringify(frameNotes);
+    if (framesNow !== lastFrames) {
+      lastFrames = framesNow;
+      deps.onTrace({ kind: 'frames', round, answered: listing.framesSeen, ...frameNotes });
+    }
+
     const keyed = withStableKeys(listing.clickables);
+
+    // Whether each control could be pressed is part of the page's state: a dialog opening changes
+    // no control's identity, only what is reachable.
+    const signature = keyed
+      .map((entry) => `${frameKey(entry)}~${entry.reach?.kind ?? '?'}`)
+      .join('|');
+    const change: ListingChange =
+      lastListing === undefined ? 'first' : lastListing === signature ? 'same' : 'different';
+    lastListing = signature;
+
+    const covered = keyed.filter((entry) => entry.reach?.kind === 'covered');
+    const coveredBy = [
+      ...new Set(
+        covered.flatMap((entry) => (entry.reach?.kind === 'covered' ? [entry.reach.by] : [])),
+      ),
+    ].slice(0, 3);
+    // Progress is something a visitor would notice: a kind of control this sweep has not seen, or
+    // the page fully uncovered. A control flickering in and out of reach is not. On a live run a
+    // toast or carousel did that every other round, and counting it as progress kept releasing
+    // refused controls and resetting the count, so the sweep spun behind an overlay for ten rounds
+    // instead of stopping. Kinds, not element ids: a re-rendered toast gets a fresh id each time.
+    const newKinds = keyed.filter((entry) => !seenKinds.has(entry.stableKey)).length;
+    for (const entry of keyed) {
+      seenKinds.add(entry.stableKey);
+    }
+    if (newKinds > 0 || (coveredBefore > 0 && covered.length === 0)) {
+      stalls = 0;
+      recoveries = 0;
+      refused.clear();
+    } else if (awaitingEffect) {
+      stalls += 1;
+    }
+    awaitingEffect = false;
+
+    if (lastClicked !== undefined && covered.length > coveredBefore) {
+      opener = lastClicked;
+    }
+    coveredBefore = covered.length;
+    lastClicked = undefined;
+    // A headless DOM measures every element as 0×0; size says nothing there, so it is ignored.
+    const sizeKnown = keyed.some((entry) => entry.reach !== undefined && entry.reach.kind !== 'no-size');
+    const pressable = (entry: KeyedClickable): boolean =>
+      entry.reach === undefined ||
+      (entry.reach.kind !== 'covered' && (entry.reach.kind !== 'no-size' || !sizeKnown));
+
     const available = keyed.filter(
       (entry) =>
         deps.allowed(entry.risk) &&
         // Two identities, deliberately. The element id is exact while this document lives; the
         // stable key is the only thing that survives navigating away and coming back.
         !visited.has(frameKey(entry)) &&
-        !spent.has(entry.stableKey),
+        !spent.has(entry.stableKey) &&
+        !refused.has(frameKey(entry)),
     );
-    const worthClicking = available.filter((entry) => !exhausted(entry.group));
+    const worthClicking = available.filter(
+      (entry) => !exhausted(entry.group) && pressable(entry),
+    );
+    const notices = listed.notices ?? [];
+    const newNotices = notices.filter((text) => !lastNotices.has(text));
+    lastNotices = new Set(notices);
+
+    deps.onTrace({
+      kind: 'listed',
+      round,
+      controls: keyed.length,
+      frames: listing.framesSeen,
+      inOverlay: keyed.filter((entry) => entry.inOverlay === true).length,
+      covered: covered.length,
+      coveredBy,
+      candidates: worthClicking.length,
+      change,
+      stalls,
+      newNotices,
+    });
+
+    if (stalls >= deps.maxStalls) {
+      stalls = 0;
+      if (await recover(round)) {
+        continue;
+      }
+      return {
+        observations,
+        captured,
+        skippedAsRepeats,
+        navigatedTo: undefined,
+        routesSeen: [...routesSeen],
+        unreachableFrames,
+        framesSeen,
+        frames,
+        stopped: blockedReason(deps.maxStalls, visited.size, lastBlocker),
+      };
+    }
 
     /**
      * What to click next, in the order the page's own structure argues for.
@@ -308,23 +462,38 @@ export async function sweepPage(
     // order, so taking it in turn meant opening a modal and immediately closing it again without
     // touching a single one of the controls it was opened to reach.
     const keeps = stays.filter((entry) => entry.dismisses !== true);
+    // Controls a visitor can see and press right now go before ones that need a scroll. With a
+    // dialog open, that is the dialog's own buttons: the page behind is covered and already out.
+    const inView = keeps.filter((entry) => entry.reach?.kind === 'self');
     const next =
+      inView.find((entry) => entry.inOverlay === true || entry.frameId !== 0) ??
+      inView[0] ??
       keeps.find((entry) => entry.inOverlay === true || entry.frameId !== 0) ??
       keeps[0] ??
       stays[0] ??
       worthClicking[0];
     if (next === undefined) {
-      // Nothing left to click here. If a click opened an overlay, closing it may reveal the page
-      // underneath — so try that once, then stop if it changes nothing.
-      if (!justDismissed) {
-        justDismissed = true;
-        await deps.driver.send({ kind: 'dismiss' });
+      // Nothing left to click. Something may be covering the rest of the page — or a click opened
+      // an overlay whose closing reveals more — so try to uncover it before giving up.
+      if (await recover(round)) {
         continue;
+      }
+      if (covered.length > 0) {
+        return {
+          observations,
+          captured,
+          skippedAsRepeats,
+          navigatedTo: undefined,
+          routesSeen: [...routesSeen],
+          unreachableFrames,
+          framesSeen,
+          frames,
+          stopped: coveredReason(covered.length, covered[0]?.reach),
+        };
       }
       skippedAsRepeats += available.length;
       break;
     }
-    justDismissed = false;
     visited.add(frameKey(next));
     spent.add(next.stableKey);
     tried.set(next.group, (tried.get(next.group) ?? 0) + 1);
@@ -336,6 +505,7 @@ export async function sweepPage(
 
       if (needs !== undefined && needs.isSubmit && needs.fields.length > 0) {
         const decision = await deps.onNeedsInput({ label: next.label, fields: needs.fields });
+        deps.onTrace({ kind: 'asked', round, label: next.label, fields: needs.fields, decision });
 
         if (decision === 'stop') {
           return {
@@ -381,6 +551,33 @@ export async function sweepPage(
         ? await deps.driver.send(clickCommand)
         : await deps.driver.sendTo(next.frameId, clickCommand);
 
+    if (clicked.kind !== 'clicked') {
+      deps.onTrace({
+        kind: 'missed',
+        round,
+        label: next.label,
+        frameId: next.frameId,
+        reply: clicked.kind === 'error' ? `error: ${clicked.message}` : clicked.kind,
+        hit: clicked.kind === 'unclickable' ? clicked.hit : undefined,
+      });
+      stalls += 1;
+    }
+
+    if (clicked.kind === 'unclickable') {
+      // Not spent: it was never pressed, and once whatever covers it is gone it is as worth
+      // clicking as ever. Set aside until the page changes, so it is not picked again next round.
+      visited.delete(frameKey(next));
+      spent.delete(next.stableKey);
+      tried.set(next.group, (tried.get(next.group) ?? 1) - 1);
+      refused.add(frameKey(next));
+      lastBlocker =
+        clicked.hit.kind === 'covered'
+          ? `"${next.label}" was covered by ${clicked.hit.by}`
+          : clicked.hit.kind === 'off-screen'
+            ? `"${next.label}" could not be scrolled into view`
+            : `"${next.label}" takes up no space`;
+      continue;
+    }
     // The element went away between listing and clicking. The page is fine; skip it.
     if (clicked.kind === 'not-found') {
       continue;
@@ -407,6 +604,13 @@ export async function sweepPage(
     await delay(deps.settleMs);
     const fired = deps.payloadsSince(from);
     captured.push(...fired);
+    lastClicked = next;
+    if (fired.length > 0) {
+      stalls = 0;
+      recoveries = 0;
+    } else {
+      awaitingEffect = true;
+    }
     const seenForGroup = produced.get(next.group) ?? new Set<string>();
     const novel = fired.filter((payload) => {
       const name = payload.eventName;
@@ -438,6 +642,16 @@ export async function sweepPage(
     // what a single-page overlay or quick-view does — leaves every remaining control right where
     // it was, so stopping there abandoned the sweep for no reason.
     const here = await deps.driver.send({ kind: 'location' });
+    deps.onTrace({
+      kind: 'clicked',
+      round,
+      label: next.label,
+      frameId: next.frameId,
+      inOverlay: next.inOverlay === true,
+      hit: clicked.hit,
+      fired: fired.map(describeEvent),
+      url: here.kind === 'location' ? here.url : undefined,
+    });
     if (here.kind === 'location' && here.url !== startedUrl) {
       routesSeen.add(here.url);
     }
@@ -704,6 +918,12 @@ export async function crawlSite(deps: CrawlDeps): Promise<CrawlOutcome> {
     // The sweep adds to both sets as it goes: this page's spent controls, and the crawl-wide
     // record of what each kind of control is worth clicking.
     const outcome = await sweepPage(deps, clickLimit, { clickedHere, groups });
+    deps.onTrace({
+      kind: 'ended',
+      clicks: outcome.observations.length,
+      stopped: outcome.stopped,
+      navigatedTo: outcome.navigatedTo,
+    });
     captured.push(...outcome.captured);
 
     const shape = urlShape(url);
@@ -831,6 +1051,24 @@ async function listClickables(deps: SweepDeps): Promise<{
     // How many documents actually answered — one means frame discovery found nothing but the top.
     framesSeen: replies.length,
   };
+}
+
+/** Why a sweep gave up after too many rounds that achieved nothing. */
+function blockedReason(maxStalls: number, clicks: number, lastBlocker: string | undefined): string {
+  const last = lastBlocker === undefined ? '' : ` Last refused: ${lastBlocker}.`;
+  return (
+    `Stopped after ${clicks} click${clicks === 1 ? '' : 's'} — ${maxStalls} in a row changed nothing, and closing ` +
+    `whatever was on top did not help.${last}`
+  );
+}
+
+/** Why a sweep stopped with controls left that something on top keeps out of reach. */
+function coveredReason(count: number, reach: ClickHit | undefined): string {
+  const by = reach?.kind === 'covered' ? ` by ${reach.by}` : '';
+  return (
+    `Stopped: ${count} control${count === 1 ? '' : 's'} still covered${by}, and closing it ` +
+    'did not work. Close it by hand and sweep again.'
+  );
 }
 
 /**

@@ -56,6 +56,13 @@ export interface Clickable {
    * control.
    */
   readonly dismisses?: boolean;
+  /**
+   * What a pointer would hit at this control's centre when the page was listed.
+   *
+   * Optional because drivers and fakes that do not measure leave it out, and that is read as
+   * "not known to be blocked".
+   */
+  readonly reach?: ClickHit;
 }
 
 const CLICKABLE_SELECTOR =
@@ -121,6 +128,7 @@ export function findClickables(document: Document): readonly Clickable[] {
 
   for (const element of documentsIn(document).flatMap((doc) => [
     ...doc.querySelectorAll(CLICKABLE_SELECTOR),
+    ...scriptedControls(doc),
   ])) {
     if (!isUsable(element)) {
       continue;
@@ -139,10 +147,39 @@ export function findClickables(document: Document): readonly Clickable[] {
       group: groupOf(element),
       inOverlay: inOverlay(element),
       dismisses: dismisses(element),
+      reach: hitAt(element),
     });
   }
 
   return found;
+}
+
+/**
+ * Elements a site made clickable with script alone: a `<div>` given a click handler and nothing
+ * in the markup to say so — no tag, no role, no `onclick`.
+ *
+ * A Fynd storefront's "Remove Item" dialog is built entirely this way, so its REMOVE and MOVE TO
+ * WISHLIST were never listed and the sweep could only click the page behind it. Component
+ * frameworks produce these on every kind of site. Listeners are invisible to a content script, so
+ * this reads the signal the site gives its own visitors: the pointer cursor.
+ *
+ * Only where the pointer *starts*, because the cursor is inherited and every child of a clickable
+ * card reports it too; and never in or around a real control, which already stands for it.
+ */
+function scriptedControls(document: Document): readonly Element[] {
+  const view = document.defaultView;
+  if (view === null || document.body === null) {
+    return [];
+  }
+  const pointer = (element: Element): boolean => view.getComputedStyle(element).cursor === 'pointer';
+
+  return [...document.body.querySelectorAll('*')].filter(
+    (element) =>
+      pointer(element) &&
+      (element.parentElement === null || !pointer(element.parentElement)) &&
+      element.closest(CLICKABLE_SELECTOR) === null &&
+      element.querySelector(CLICKABLE_SELECTOR) === null,
+  );
 }
 
 /**
@@ -164,6 +201,92 @@ export function documentsIn(root: Document): readonly Document[] {
   }
 
   return documents;
+}
+
+/**
+ * One `<iframe>` element as the page holding it sees it.
+ *
+ * A frame our content script never loads in cannot announce itself, so counting the frames that
+ * answered says nothing about it — a live run reported "1 frame" throughout while a dialog's
+ * buttons sat in a frame nothing listed. This describes every frame element instead.
+ */
+export interface FrameNote {
+  /** The `src` as written, or `srcdoc` / `about:blank` when there is none. */
+  readonly source: string;
+  /** Whether its document can be read from here — same origin. */
+  readonly readable: boolean;
+  readonly width: number;
+  readonly height: number;
+}
+
+export function describeFrames(root: Document): readonly FrameNote[] {
+  return documentsIn(root).flatMap((document) =>
+    [...document.querySelectorAll('iframe')].map((frame) => {
+      const box = frame.getBoundingClientRect();
+      return {
+        source:
+          frame.getAttribute('src') ?? (frame.hasAttribute('srcdoc') ? 'srcdoc' : 'about:blank'),
+        readable: frame.contentDocument !== null,
+        width: Math.round(box.width),
+        height: Math.round(box.height),
+      };
+    }),
+  );
+}
+
+/**
+ * Controls inside open shadow roots, which `querySelectorAll` does not reach.
+ *
+ * Counted rather than listed: a dialog built as a web component shows in the Elements panel as a
+ * nested document, looks like an iframe, and its buttons are as invisible to the sweep as a
+ * cross-origin frame's. Closed shadow roots cannot be seen from outside at all.
+ */
+export function controlsInShadow(root: Document): number {
+  let count = 0;
+  const visit = (scope: Document | ShadowRoot): void => {
+    for (const element of scope.querySelectorAll('*')) {
+      if (element.shadowRoot !== null) {
+        count += element.shadowRoot.querySelectorAll(CLICKABLE_SELECTOR).length;
+        visit(element.shadowRoot);
+      }
+    }
+  };
+  for (const document of documentsIn(root)) {
+    visit(document);
+  }
+  return count;
+}
+
+/**
+ * Where a page tells its visitor something happened: ARIA live regions, and the class names toast
+ * libraries use when a site adds no ARIA at all.
+ *
+ * For the run log only. A click that fires no event can be the tool's fault or the site's — "this
+ * item is unavailable" — and only what the page said tells the two apart. A live Add to Cart that
+ * fired nothing left one extra element on the page and no way to read it.
+ */
+const NOTICE_SELECTOR = [
+  '[role="alert"]',
+  '[role="status"]',
+  '[aria-live="polite"]',
+  '[aria-live="assertive"]',
+  '[class*="toast" i]',
+  '[class*="snackbar" i]',
+  '[class*="notification" i]',
+].join(', ');
+
+/** Longest notice kept; a toast is a sentence, and a region this long is a page section. */
+const NOTICE_MAX = 120;
+
+export function noticesIn(root: Document): readonly string[] {
+  const texts = documentsIn(root).flatMap((document) =>
+    [...document.querySelectorAll(NOTICE_SELECTOR)]
+      // The innermost one speaks: a toast container holds its toasts and would repeat them all.
+      .filter((element) => element.querySelector(NOTICE_SELECTOR) === null && isUsable(element))
+      .map((element) => (element.textContent ?? '').replace(/\s+/g, ' ').trim())
+      .filter((text) => text !== '' && text.length <= NOTICE_MAX),
+  );
+  return [...new Set(texts)];
 }
 
 /** Frames we cannot see into, so the panel can say so instead of quietly covering less. */
@@ -244,7 +367,24 @@ function dismisses(element: Element): boolean {
     return true;
   }
 
-  return DISMISS_LABEL.test(labelOf(element).trim());
+  if (DISMISS_LABEL.test(labelOf(element).trim())) {
+    return true;
+  }
+
+  // An overlay's X is very often just a picture: no text, no aria-label, no title. Found on a
+  // Fynd storefront's "Remove Item" dialog, where it came first in document order and would have
+  // closed the dialog before REMOVE or MOVE TO WISHLIST was ever tried.
+  return iconOnly(element) && inOverlay(element);
+}
+
+/** A control that says nothing in words and shows only an icon. */
+function iconOnly(element: Element): boolean {
+  return (
+    (element.textContent ?? '').trim() === '' &&
+    (element.getAttribute('aria-label') ?? '').trim() === '' &&
+    (element.getAttribute('title') ?? '').trim() === '' &&
+    element.querySelector('svg, img') !== null
+  );
 }
 
 /** Containers that announce themselves as an overlay. */
@@ -347,6 +487,91 @@ function labelOf(element: Element): string {
     element.getAttribute('value') ??
     element.nodeName.toLowerCase()
   );
+}
+
+/**
+ * What a real pointer would have hit at the control's centre, at the moment it was clicked.
+ *
+ * `element.click()` fires on an element even when a modal is drawn over it, so a sweep can
+ * "click" the page behind an open dialog indefinitely while nothing a visitor could do happens.
+ * A live run on levisons.co.za did exactly that, behind both a "Remove Item" dialog and an open
+ * navigation menu.
+ *
+ * Only the element's own document is tested: a dialog in the top document laid over an iframe
+ * is invisible from inside the frame.
+ */
+export type ClickHit =
+  | { readonly kind: 'self' }
+  /**
+   * Something sits on top, but it is the control's own dressing — an icon drawn over a cart
+   * row's X as a sibling rather than a child. A visitor pressing there reaches the same control.
+   */
+  | { readonly kind: 'decoration'; readonly by: string }
+  | { readonly kind: 'covered'; readonly by: string }
+  /** Outside the viewport; scrolling it into view may or may not uncover it. */
+  | { readonly kind: 'off-screen' }
+  /** Takes up no space — a closed drawer's contents, the hidden half of a responsive header. */
+  | { readonly kind: 'no-size' }
+  /** The browser would not say what is on top. */
+  | { readonly kind: 'unmeasured' };
+
+/**
+ * Whether a visitor could not press this control as things stand, asked once it has been scrolled
+ * to. Off-screen then means it could not be brought into view — a dialog that locks scrolling holds
+ * the page behind it still, and clicking there anyway reached the page behind the dialog.
+ */
+export function blocksClick(hit: ClickHit): boolean {
+  return hit.kind === 'covered' || hit.kind === 'no-size' || hit.kind === 'off-screen';
+}
+
+/**
+ * How close something on top must be, in the tree, to count as the control's own dressing.
+ *
+ * Its parent or grandparent. A cart row's icon sits beside its button; a navigation menu or a
+ * dialog over the same spot shares nothing nearer than the page's main wrapper.
+ */
+const DECORATION_DEPTH = 2;
+
+function isDecoration(element: Element, top: Element): boolean {
+  if (top.closest(OVERLAY_SELECTOR) !== element.closest(OVERLAY_SELECTOR)) {
+    return false;
+  }
+  let ancestor = element.parentElement;
+  for (let depth = 0; depth < DECORATION_DEPTH && ancestor !== null; depth += 1) {
+    if (ancestor.contains(top)) {
+      return true;
+    }
+    ancestor = ancestor.parentElement;
+  }
+  return false;
+}
+
+export function hitAt(element: Element): ClickHit {
+  const view = element.ownerDocument.defaultView;
+  if (view === null) {
+    return { kind: 'unmeasured' };
+  }
+  const box = element.getBoundingClientRect();
+  if (box.width === 0 && box.height === 0) {
+    return { kind: 'no-size' };
+  }
+
+  const x = box.left + box.width / 2;
+  const y = box.top + box.height / 2;
+  if (x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight) {
+    return { kind: 'off-screen' };
+  }
+
+  const top = element.ownerDocument.elementFromPoint(x, y);
+  if (top === null) {
+    return { kind: 'unmeasured' };
+  }
+  if (top === element || element.contains(top)) {
+    return { kind: 'self' };
+  }
+  const overlay = top.closest(OVERLAY_SELECTOR) === null ? '' : ' (in a dialog)';
+  const by = `${top.nodeName.toLowerCase()} "${labelOf(top)}"${overlay}`;
+  return isDecoration(element, top) ? { kind: 'decoration', by } : { kind: 'covered', by };
 }
 
 export function riskOf(element: Element): ClickRisk {

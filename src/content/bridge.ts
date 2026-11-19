@@ -3,7 +3,18 @@ import { resolveTarget } from '../automation/find-target';
 import { detectPlatform, findByPlatform } from '../automation/platforms/adapters';
 import { selectorFor } from '../automation/selector';
 import { formNeeds } from '../automation/fill';
-import { crossOriginFrames, findAcrossFrames, findClickables, pageStamp } from '../automation/sweep';
+import {
+  blocksClick,
+  controlsInShadow,
+  crossOriginFrames,
+  describeFrames,
+  findAcrossFrames,
+  findClickables,
+  hitAt,
+  noticesIn,
+  pageStamp,
+  type ClickHit,
+} from '../automation/sweep';
 import type { AutomationCommand, AutomationReply } from '../automation/commands';
 
 /**
@@ -88,11 +99,13 @@ chrome.runtime.onMessage.addListener(
         }
 
         // Scroll first: a click on an off-screen element is accepted by the DOM but is not what
-        // a user would have done, and some sites only bind handlers once visible.
-        element.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        // a user would have done, and some sites only bind handlers once visible. Instant, not
+        // smooth: whether the control can be pressed is measured where it will be clicked, and a
+        // fixed header passing over it mid-scroll would refuse a click that was fine.
+        element.scrollIntoView({ block: 'center', behavior: 'instant' });
 
-        void clickVisibly(element, command.show !== false).then(() => {
-          sendResponse({ kind: 'clicked' });
+        void clickVisibly(element, command.show !== false).then((hit) => {
+          sendResponse(blocksClick(hit) ? { kind: 'unclickable', hit } : { kind: 'clicked', hit });
         });
         // The reply waits for the pointer animation, so the channel stays open.
         return true;
@@ -182,6 +195,9 @@ chrome.runtime.onMessage.addListener(
           kind: 'clickables',
           clickables: findClickables(document),
           unreachableFrames: crossOriginFrames(document),
+          iframes: describeFrames(document),
+          shadowControls: controlsInShadow(document),
+          notices: noticesIn(document),
         });
         return false;
 
@@ -210,8 +226,12 @@ const LINGER_MS = 160;
  * Automation that clicks invisibly is impossible to trust or debug — you cannot tell a wrong
  * click from no click. The overlay is inert (`pointer-events: none`) and marked so the sweep's
  * own enumeration skips it.
+ *
+ * Returns what a real pointer would have hit, measured immediately before the click, since
+ * afterwards the click may have changed the page. A control a visitor could not press — covered,
+ * or taking no space — is not clicked at all; the caller is told why instead.
  */
-async function clickVisibly(element: Element, show: boolean): Promise<void> {
+async function clickVisibly(element: Element, show: boolean): Promise<ClickHit> {
   // A link that opens a new tab takes the click somewhere DevTools cannot follow, so for the
   // duration of the click it is asked to open here instead.
   const anchor = element.closest('a[target="_blank"]');
@@ -225,9 +245,12 @@ async function clickVisibly(element: Element, show: boolean): Promise<void> {
   };
 
   if (!show) {
-    (element as HTMLElement).click();
+    const hit = hitAt(element);
+    if (!blocksClick(hit)) {
+      (element as HTMLElement).click();
+    }
     finish();
-    return;
+    return hit;
   }
 
   const box = element.getBoundingClientRect();
@@ -255,13 +278,17 @@ async function clickVisibly(element: Element, show: boolean): Promise<void> {
   // A quick squeeze at the moment of the click, so the click itself is visible too.
   cursor.style.transform = `translate(${x}px, ${y}px) scale(0.55)`;
 
-  (element as HTMLElement).click();
+  const hit = hitAt(element);
+  if (!blocksClick(hit)) {
+    (element as HTMLElement).click();
+  }
 
   await wait(LINGER_MS);
   cursor.style.transform = `translate(${x}px, ${y}px) scale(1)`;
   (element as HTMLElement).style.outline = previousOutline;
   label.style.opacity = '0';
   finish();
+  return hit;
 }
 
 /** How far this element's document sits from the top one, through any nesting of frames. */

@@ -159,7 +159,16 @@ export function TestRunner({
           ? { kind: 'executed' }
           : {
               kind: 'execution-failed',
-              reason: reply.kind === 'error' ? reply.message : 'The click did not land.',
+              reason:
+                reply.kind === 'error'
+                  ? reply.message
+                  : reply.kind === 'unclickable' && reply.hit.kind === 'covered'
+                    ? `A visitor could not press it: ${reply.hit.by} is on top of it.`
+                    : reply.kind === 'unclickable' && reply.hit.kind === 'off-screen'
+                      ? 'A visitor could not press it: it could not be scrolled into view.'
+                      : reply.kind === 'unclickable'
+                      ? 'A visitor could not press it: it takes up no space on the page.'
+                      : 'The click did not land.',
             },
       );
     });

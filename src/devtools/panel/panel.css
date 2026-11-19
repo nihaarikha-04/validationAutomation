@@ -492,6 +492,14 @@ body {
   padding-left: 18px;
 }
 
+.sweep__trace {
+  max-height: 320px;
+  overflow: auto;
+  margin: 6px 0 0;
+  font-size: 11px;
+  white-space: pre;
+}
+
 .runner__outcome--not-seen { background: #6b6b6b; }
 
 .sweep__frames {

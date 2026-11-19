@@ -10,6 +10,11 @@ import {
   type PageResult,
 } from '../../../automation/crawl';
 import type { ClickRisk } from '../../../automation/sweep';
+import {
+  traceLine,
+  type SweepTrigger,
+  type TraceEntry,
+} from '../../../automation/trace';
 import type { EventSheet } from '../../../event-sheet/types';
 import type { CapturedPayload } from '../../../shared/payload';
 import { VerdictDetail } from './VerdictDetail';
@@ -33,6 +38,14 @@ const VIEW_DWELL_MS = 1_200;
 
 /** Enough for lazy content to load when we are only scrolling to populate the DOM. */
 const LOAD_SCROLL_MS = 180;
+
+/**
+ * Rounds in a row that achieve nothing before a sweep tries to uncover the page, and again before
+ * it gives up. Five: a dialog behind which every click is refused trips it within seconds, while
+ * a run of genuinely quiet controls — tabs that fire nothing — rarely reaches it, because each one
+ * changes the page.
+ */
+const MAX_STALLS = 5;
 
 export const DEFAULT_SETTLE_MS = SETTLE_MS;
 
@@ -97,6 +110,12 @@ export function PageSweep({
   const [sameKind, setSameKind] = useState(0);
   const [report, setReport] = useState<RunReport | undefined>(undefined);
   const [problem, setProblem] = useState<string | undefined>(undefined);
+  /**
+   * The run log. Kept across automatic restarts and cleared only by the button, so a sweep that
+   * keeps starting itself over shows up as repeated starts rather than as one short run.
+   */
+  const [trace, setTrace] = useState<readonly string[]>([]);
+  const log = (entry: TraceEntry): void => setTrace((lines) => [...lines, traceLine(entry)]);
   const running = progress !== undefined;
 
   // The loop is async and cannot see prop updates, so the newest payloads are mirrored here.
@@ -111,14 +130,14 @@ export function PageSweep({
    * Only when nothing is running: a crawl navigates constantly by design, and restarting on its
    * own navigations would tear it down and begin again on every page.
    */
-  const sweepRef = useRef<() => Promise<void>>(async () => undefined);
+  const sweepRef = useRef<(trigger: SweepTrigger) => Promise<void>>(async () => undefined);
   useEffect(() => {
     if (!autoResume) {
       return undefined;
     }
     return navigation.subscribe(() => {
       if (progress === undefined) {
-        void sweepRef.current();
+        void sweepRef.current('page-changed');
       }
     });
   }, [navigation, autoResume, progress]);
@@ -130,7 +149,11 @@ export function PageSweep({
     (risk === 'navigates' && (includeNavigating || crawl)) ||
     (risk === 'destructive' && includeDestructive);
 
-  const sweep = async (): Promise<void> => {
+  const sweep = async (trigger: SweepTrigger): Promise<void> => {
+    if (trigger === 'button') {
+      setTrace([]);
+    }
+    log({ kind: 'started', trigger });
     setProblem(undefined);
     setObservations([]);
     setReport(undefined);
@@ -150,6 +173,8 @@ export function PageSweep({
       dwellMs: observe ? VIEW_DWELL_MS : LOAD_SCROLL_MS,
       payloadsSince: (from: number) => latest.current.filter((payload) => payload.at >= from),
       onProgress: (message: string) => setProgress(message),
+      onTrace: log,
+      maxStalls: MAX_STALLS,
       allowed,
       onNeedsInput: (request: InputRequest) =>
         new Promise<InputDecision>((resolve) => {
@@ -183,6 +208,12 @@ export function PageSweep({
         setProblem(outcome.stopped ?? outcome.pages.find((page) => page.stopped)?.stopped);
       } else {
         const outcome = await sweepPage(shared);
+        log({
+          kind: 'ended',
+          clicks: outcome.observations.length,
+          stopped: outcome.stopped,
+          navigatedTo: outcome.navigatedTo,
+        });
         setObservations(outcome.observations);
         setSkipped(outcome.skippedAsRepeats);
         record();
@@ -334,7 +365,7 @@ export function PageSweep({
           </select>
         </label>
 
-        <button type="button" disabled={running} onClick={() => void sweep()}>
+        <button type="button" disabled={running} onClick={() => void sweep('button')}>
           {crawl ? 'Crawl the site' : 'Sweep page'}
         </button>
 
@@ -476,6 +507,16 @@ export function PageSweep({
             ))}
           </ul>
         </>
+      )}
+
+      {trace.length === 0 ? null : (
+        <details className="sweep__log">
+          <summary>Run log ({trace.length} lines)</summary>
+          <button type="button" onClick={() => onExport(trace.join('\n'), 'sweep-log.txt')}>
+            Download log
+          </button>
+          <pre className="sweep__trace">{trace.join('\n')}</pre>
+        </details>
       )}
 
       {pages.length === 0 ? null : (

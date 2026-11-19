@@ -1,4 +1,4 @@
-import type { Clickable } from './sweep';
+import type { Clickable, ClickHit, FrameNote } from './sweep';
 import type { ActionCandidate, ActionTarget } from './types';
 import type { TargetResolution } from './find-target';
 
@@ -44,7 +44,13 @@ export type AutomationReply =
       readonly platform: string;
       readonly candidates: readonly ActionCandidate[];
     }
-  | { readonly kind: 'clicked' }
+  /** `hit` is absent from replies that did not measure it — the targeted runner's, and fakes. */
+  | { readonly kind: 'clicked'; readonly hit?: ClickHit }
+  /**
+   * The click was refused: a visitor could not have made it. `element.click()` would have fired
+   * anyway, which is how a sweep clicked the page behind an open dialog for round after round.
+   */
+  | { readonly kind: 'unclickable'; readonly hit: ClickHit }
   /** The selector no longer matches anything — the page changed, but it is still alive. */
   | { readonly kind: 'not-found' }
   | { readonly kind: 'dismissed' }
@@ -66,6 +72,12 @@ export type AutomationReply =
       readonly clickables: readonly Clickable[];
       /** Frames we could not see into, so coverage gaps are reported rather than silent. */
       readonly unreachableFrames?: number;
+      /** Every iframe element, readable or not — answered by the top frame only. */
+      readonly iframes?: readonly FrameNote[];
+      /** Controls inside open shadow roots, which the listing does not include. */
+      readonly shadowControls?: number;
+      /** What the page is telling its visitor right now — toasts, alerts, status messages. */
+      readonly notices?: readonly string[];
     }
   | { readonly kind: 'resolved'; readonly resolution: TargetResolution }
   | { readonly kind: 'error'; readonly message: string };

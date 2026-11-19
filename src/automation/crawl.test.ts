@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { CapturedPayload } from '../shared/payload';
 import type { AutomationCommand, AutomationReply, PageDriver } from './commands';
+import type { TraceEntry } from './trace';
+import type { Clickable } from './sweep';
 import { crawlSite, newGroupMemory, sweepPage, withStableKeys, type SweepDeps } from './crawl';
 
 const NOW = 4_000_000;
@@ -31,6 +33,8 @@ function deps(driver: PageDriver, overrides: Partial<SweepDeps> = {}): SweepDeps
     settleMs: 0,
     payloadsSince: () => [],
     onProgress: () => undefined,
+    onTrace: () => undefined,
+    maxStalls: 5,
     allowed: (risk) => risk === 'safe',
     showPointer: false,
     // Off by default so each test opts in and the command sequences stay readable.
@@ -906,7 +910,9 @@ describe('crawlSite', () => {
       },
     };
 
-    await crawlSite({ ...deps(driver), maxPages: 1, clicksPerPage: 6 });
+    // Forty controls that fire nothing on a page that never changes is exactly what the stall
+    // limit stops; this test is about the click budget, so the limit is moved out of the way.
+    await crawlSite({ ...deps(driver, { maxStalls: 100 }), maxPages: 1, clicksPerPage: 6 });
 
     // Otherwise one busy page absorbs the entire run and it looks like it never navigates.
     expect(clicks).toBe(6);
@@ -1640,5 +1646,307 @@ describe('exploring a modal before closing it', () => {
     await sweepPage(deps(site.driver));
 
     expect(site.clicked().at(-1)).toBe('#x');
+  });
+});
+
+describe('sweepPage run log', () => {
+  it('logs each listing, the click and what it hit, and a click that did not land', async () => {
+    const controls = [
+      { selector: '#a', label: 'A', risk: 'safe' as const, group: '#a-kind' },
+      { selector: '#gone', label: 'Gone', risk: 'safe' as const, group: '#gone-kind' },
+    ];
+    const page = scriptedPage((command) => {
+      if (command.kind === 'clickables') {
+        return { kind: 'clickables', clickables: controls };
+      }
+      if (command.kind === 'click') {
+        return command.selector === '#a'
+          ? { kind: 'clicked', hit: { kind: 'covered', by: 'div "Remove Item"' } }
+          : { kind: 'not-found' };
+      }
+      if (command.kind === 'location') {
+        return { kind: 'location', url: 'https://x.test/cart', stamp: 's1' };
+      }
+      return { kind: 'dismissed' };
+    });
+    const trace: TraceEntry[] = [];
+
+    await sweepPage(deps(page.driver, { onTrace: (entry) => trace.push(entry) }));
+
+    expect(trace.map((entry) => entry.kind)).toEqual([
+      'sweep',
+      'frames',
+      'listed',
+      'clicked',
+      'listed',
+      'missed',
+      'listed',
+      'recovering',
+      'listed',
+    ]);
+    expect(trace[3]).toMatchObject({
+      kind: 'clicked',
+      label: 'A',
+      hit: { kind: 'covered', by: 'div "Remove Item"' },
+      url: 'https://x.test/cart',
+    });
+    expect(trace[5]).toMatchObject({ kind: 'missed', label: 'Gone', reply: 'not-found' });
+    // The page answered with the same controls every round — the signature of a stuck sweep.
+    expect(trace.filter((entry) => entry.kind === 'listed').map((entry) => entry.change)).toEqual([
+      'first',
+      'same',
+      'same',
+      'same',
+    ]);
+  });
+});
+
+describe('sweepPage stall limit', () => {
+  const selfHit = { kind: 'self' as const };
+  const offScreen = { kind: 'off-screen' as const };
+  const coveredByNav = { kind: 'covered' as const, by: 'nav "Women"' };
+
+  function control(id: string, reach: Clickable['reach'], extra: Partial<Clickable> = {}): Clickable {
+    return { selector: `#${id}`, label: id.toUpperCase(), risk: 'safe', group: `${id}-kind`, reach, ...extra };
+  }
+
+  function clicksOf(sent: readonly AutomationCommand[]): string[] {
+    return sent.flatMap((command) => (command.kind === 'click' ? [command.selector] : []));
+  }
+
+  it('leaves covered controls alone and presses an open dialog’s own buttons first', async () => {
+    const page = scriptedPage((command) =>
+      command.kind === 'clickables'
+        ? {
+            kind: 'clickables',
+            clickables: [
+              control('behind', coveredByNav),
+              control('below', offScreen),
+              control('move', selfHit, { inOverlay: true }),
+            ],
+          }
+        : command.kind === 'click'
+          ? { kind: 'clicked' }
+          : { kind: 'dismissed' },
+    );
+
+    await sweepPage(deps(page.driver));
+
+    expect(clicksOf(page.sent)[0]).toBe('#move');
+    expect(clicksOf(page.sent)).not.toContain('#behind');
+  });
+
+  it('comes back to a refused control once whatever covered it has gone', async () => {
+    let dialogOpen = true;
+    const page = scriptedPage((command) => {
+      if (command.kind === 'clickables') {
+        // While the dialog is open the page behind it reads as covered, as it does live.
+        return {
+          kind: 'clickables',
+          clickables: dialogOpen
+            ? [control('page', offScreen), control('under', coveredByNav)]
+            : [control('page', selfHit), control('under', selfHit)],
+        };
+      }
+      if (command.kind === 'dismiss') {
+        dialogOpen = false;
+        return { kind: 'dismissed' };
+      }
+      if (command.kind === 'click') {
+        return dialogOpen
+          ? { kind: 'unclickable', hit: { kind: 'covered', by: 'div "Remove Item" (in a dialog)' } }
+          : { kind: 'clicked' };
+      }
+      return { kind: 'acknowledged' };
+    });
+    const trace: TraceEntry[] = [];
+
+    const outcome = await sweepPage(deps(page.driver, { onTrace: (entry) => trace.push(entry) }));
+
+    // Refused once behind the dialog, then pressed for real after Escape closed it.
+    expect(clicksOf(page.sent).slice(0, 2)).toEqual(['#page', '#page']);
+    expect(outcome.observations.map((entry) => entry.label)).toContain('PAGE');
+    expect(trace).toContainEqual(
+      expect.objectContaining({ kind: 'missed', reply: 'unclickable', label: 'PAGE' }),
+    );
+  });
+
+  it('tries Escape, then the control that opened the cover, then stops and says what was on top', async () => {
+    let menuOpen = false;
+    const items = Array.from({ length: 20 }, (_unused, index) => `c${index}`);
+    const page = scriptedPage((command) => {
+      if (command.kind === 'clickables') {
+        return {
+          kind: 'clickables',
+          clickables: menuOpen
+            ? [
+                control('menu', selfHit),
+                ...items.map((id) => control(id, offScreen)),
+                ...['p0', 'p1', 'p2'].map((id) => control(id, coveredByNav)),
+              ]
+            : [control('menu', selfHit)],
+        };
+      }
+      if (command.kind === 'click') {
+        if (command.selector === '#menu') {
+          // Opens the menu; a second press does nothing — the toggle that fails to close it.
+          menuOpen = true;
+          return { kind: 'clicked' };
+        }
+        return { kind: 'unclickable', hit: coveredByNav };
+      }
+      return command.kind === 'dismiss' ? { kind: 'dismissed' } : { kind: 'acknowledged' };
+    });
+    const trace: TraceEntry[] = [];
+
+    const outcome = await sweepPage(deps(page.driver, { onTrace: (entry) => trace.push(entry) }));
+
+    const recoveries = trace.filter((entry) => entry.kind === 'recovering');
+    expect(recoveries).toEqual([
+      expect.objectContaining({ how: 'escape' }),
+      expect.objectContaining({ how: 'toggle', label: 'MENU' }),
+    ]);
+    expect(outcome.stopped).toBe(
+      'Stopped after 1 click — 5 in a row changed nothing, and closing whatever was on top did ' +
+        'not help. Last refused: "C14" was covered by nav "Women".',
+    );
+  });
+
+  it('does not take a toast blinking in and out for progress', async () => {
+    let listings = 0;
+    const page = scriptedPage((command) => {
+      if (command.kind === 'clickables') {
+        listings += 1;
+        // A toast that is there every other round. Not ours to press; it only changes the page.
+        const toast = listings % 2 === 0 ? [control('toast', selfHit, { risk: 'destructive' })] : [];
+        return {
+          kind: 'clickables',
+          clickables: [
+            control('menu', offScreen),
+            control('wishlist', offScreen),
+            control('under', coveredByNav),
+            ...toast,
+          ],
+        };
+      }
+      if (command.kind === 'click') {
+        return { kind: 'unclickable', hit: offScreen };
+      }
+      return command.kind === 'dismiss' ? { kind: 'dismissed' } : { kind: 'acknowledged' };
+    });
+
+    const outcome = await sweepPage(deps(page.driver));
+
+    // The toast's first appearance is genuinely new, so #menu gets one more try then; after that
+    // the toast is a known kind and its blinking buys nothing. The live run retried "open
+    // navigation" five times in ten rounds before this.
+    expect(clicksOf(page.sent)).toEqual(['#menu', '#menu', '#wishlist']);
+    expect(outcome.stopped).toBe(
+      'Stopped: 1 control still covered by nav "Women", and closing it did not work. Close it by hand and sweep again.',
+    );
+  });
+
+  it('keeps going while clicks keep producing events, even on a page that never changes', async () => {
+    const page = scriptedPage((command) =>
+      command.kind === 'clickables'
+        ? {
+            kind: 'clickables',
+            clickables: Array.from({ length: 8 }, (_unused, index) => control(`e${index}`, selfHit)),
+          }
+        : command.kind === 'click'
+          ? { kind: 'clicked' }
+          : { kind: 'dismissed' },
+    );
+    let clock = NOW;
+    const fired: CapturedPayload = {
+      id: 'p',
+      at: NOW,
+      eventName: 'banner_click',
+      args: [],
+      raw: '[]',
+      origin: 'intercepted',
+    };
+
+    const outcome = await sweepPage(
+      deps(page.driver, { now: () => (clock += 1), payloadsSince: () => [fired] }),
+    );
+
+    expect(outcome.stopped).toBeUndefined();
+    expect(outcome.observations).toHaveLength(8);
+  });
+
+  it('skips controls that take up no space, unless nothing on the page has a size', async () => {
+    const mixed = scriptedPage((command) =>
+      command.kind === 'clickables'
+        ? {
+            kind: 'clickables',
+            clickables: [control('drawer', { kind: 'no-size' }), control('shown', selfHit)],
+          }
+        : command.kind === 'click'
+          ? { kind: 'clicked' }
+          : { kind: 'dismissed' },
+    );
+    const headless = scriptedPage((command) =>
+      command.kind === 'clickables'
+        ? { kind: 'clickables', clickables: [control('a', { kind: 'no-size' })] }
+        : command.kind === 'click'
+          ? { kind: 'clicked' }
+          : { kind: 'dismissed' },
+    );
+
+    await sweepPage(deps(mixed.driver));
+    await sweepPage(deps(headless.driver));
+
+    expect(clicksOf(mixed.sent)).toEqual(['#shown']);
+    expect(clicksOf(headless.sent)).toEqual(['#a']);
+  });
+
+  it('logs what the page newly says after a click, and not again while it keeps saying it', async () => {
+    let listings = 0;
+    const page = scriptedPage((command) => {
+      if (command.kind === 'clickables') {
+        listings += 1;
+        return {
+          kind: 'clickables',
+          clickables: [control('add', selfHit), control('other', selfHit)],
+          notices: listings === 1 ? [] : ['This item is unavailable'],
+        };
+      }
+      return command.kind === 'click' ? { kind: 'clicked' } : { kind: 'dismissed' };
+    });
+    const trace: TraceEntry[] = [];
+
+    await sweepPage(deps(page.driver, { onTrace: (entry) => trace.push(entry) }));
+
+    const said = trace.flatMap((entry) => (entry.kind === 'listed' ? [entry.newNotices] : []));
+    expect(said[0]).toEqual([]);
+    expect(said[1]).toEqual(['This item is unavailable']);
+    expect(said.slice(2).every((notices) => notices.length === 0)).toBe(true);
+  });
+
+  it('logs the tester’s answer when a form would submit empty', async () => {
+    const page = scriptedPage((command) =>
+      command.kind === 'clickables'
+        ? { kind: 'clickables', clickables: [control('apply', selfHit)] }
+        : command.kind === 'form-needs'
+          ? { kind: 'form-needs', isSubmit: true, fields: ['Coupon code'] }
+          : { kind: 'dismissed' },
+    );
+    const trace: TraceEntry[] = [];
+
+    await sweepPage(
+      deps(page.driver, {
+        onTrace: (entry) => trace.push(entry),
+        onNeedsInput: () => Promise.resolve('skip'),
+      }),
+    );
+
+    expect(trace).toContainEqual({
+      kind: 'asked',
+      round: 0,
+      label: 'APPLY',
+      fields: ['Coupon code'],
+      decision: 'skip',
+    });
   });
 });

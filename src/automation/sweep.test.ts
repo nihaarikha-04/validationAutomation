@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { crossOriginFrames, findAcrossFrames, findClickables, riskOf } from './sweep';
+import {
+  blocksClick,
+  controlsInShadow,
+  crossOriginFrames,
+  describeFrames,
+  findAcrossFrames,
+  findClickables,
+  hitAt,
+  noticesIn,
+  riskOf,
+} from './sweep';
 
 /**
  * The live document, not a DOMParser one: a parsed document has no `defaultView`, so
@@ -313,5 +323,171 @@ describe('controls that close what they are in', () => {
     '<button>Back to shopping and checkout</button>',
   ])('leaves %s alone', (html) => {
     expect(only(html)).toBe(false);
+  });
+});
+
+describe('hitAt', () => {
+  /** jsdom lays nothing out, so a box and the topmost element have to be supplied. */
+  function laidOut(element: Element, topmost: Element): void {
+    element.getBoundingClientRect = () => new DOMRect(10, 10, 80, 30);
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: () => topmost,
+    });
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(document, 'elementFromPoint');
+  });
+
+  it('reports what is drawn over the control, and that it is a dialog', () => {
+    pageWith(
+      '<button id="behind">Add</button>' +
+        '<div role="dialog"><div id="cover">Remove Item</div></div>',
+    );
+    const behind = document.getElementById('behind');
+    const cover = document.getElementById('cover');
+    if (behind === null || cover === null) {
+      throw new Error('fixture missing');
+    }
+    laidOut(behind, cover);
+
+    expect(hitAt(behind)).toEqual({ kind: 'covered', by: 'div "Remove Item" (in a dialog)' });
+  });
+
+  it('counts a hit on the control’s own contents as reaching it', () => {
+    const button = only('<button><span>Add</span></button>');
+    const inner = button.firstElementChild;
+    if (inner === null) {
+      throw new Error('fixture missing');
+    }
+    laidOut(button, inner);
+
+    expect(hitAt(button)).toEqual({ kind: 'self' });
+  });
+
+  it('says a control that takes up no space could not be pressed', () => {
+    expect(hitAt(only('<button>Add</button>'))).toEqual({ kind: 'no-size' });
+  });
+
+  it('treats an icon drawn beside the control, over it, as part of the control', () => {
+    pageWith('<div class="row"><button id="x"></button><svg id="icon"></svg></div>');
+    const button = document.getElementById('x');
+    const icon = document.getElementById('icon');
+    if (button === null || icon === null) {
+      throw new Error('fixture missing');
+    }
+    laidOut(button, icon);
+
+    expect(hitAt(button)).toEqual({ kind: 'decoration', by: 'svg "svg"' });
+    expect(blocksClick(hitAt(button))).toBe(false);
+  });
+
+  it('does not excuse a menu from elsewhere in the page as decoration', () => {
+    pageWith(
+      '<main><section><div><button id="bag">Bag</button></div></section></main>' +
+        '<nav><ul><li id="women">Women</li></ul></nav>',
+    );
+    const bag = document.getElementById('bag');
+    const women = document.getElementById('women');
+    if (bag === null || women === null) {
+      throw new Error('fixture missing');
+    }
+    laidOut(bag, women);
+
+    expect(hitAt(bag)).toEqual({ kind: 'covered', by: 'li "Women"' });
+    expect(blocksClick(hitAt(bag))).toBe(true);
+  });
+});
+
+describe('describeFrames', () => {
+  it('lists every iframe element, including ones with no src', () => {
+    pageWith('<iframe src="https://widgets.test/dialog"></iframe><iframe srcdoc="<p>x</p>"></iframe>');
+
+    expect(describeFrames(document).map((frame) => frame.source)).toEqual([
+      'https://widgets.test/dialog',
+      'srcdoc',
+    ]);
+  });
+});
+
+describe('controlsInShadow', () => {
+  it('counts buttons a page hides in shadow DOM, which the listing cannot see', () => {
+    pageWith('<div id="host"></div>');
+    const host = document.getElementById('host');
+    if (host === null) {
+      throw new Error('fixture missing');
+    }
+    host.attachShadow({ mode: 'open' }).innerHTML = '<button>Remove</button><button>Move</button>';
+
+    expect(controlsInShadow(document)).toBe(2);
+    expect(findClickables(document).map((entry) => entry.label)).not.toContain('Remove');
+  });
+});
+
+describe('blocksClick', () => {
+  it('refuses a control still off-screen after scrolling to it', () => {
+    expect(blocksClick({ kind: 'off-screen' })).toBe(true);
+    expect(blocksClick({ kind: 'decoration', by: 'svg "svg"' })).toBe(false);
+    expect(blocksClick({ kind: 'self' })).toBe(false);
+  });
+});
+
+describe('findClickables on controls made clickable by script', () => {
+  /** The Fynd "Remove Item" dialog as served, reduced to its structure and the styles that matter. */
+  const DIALOG =
+    '<style>.EuGuC{position:fixed}.V2ufu,.wWPBB,.Iwkzi,.card{cursor:pointer}.card span{cursor:pointer}</style>' +
+    '<div class="EuGuC"><div class="W3hX9"><div><div>Remove Item</div>' +
+    '<div>Are your sure you want to remove this item?</div></div>' +
+    '<div class="V2ufu"><svg width="21" height="20"></svg></div></div>' +
+    '<div class="dYdRJ"><div class="wWPBB">REMOVE</div><div class="Iwkzi">MOVE TO WISHLIST</div></div></div>';
+
+  it('lists bare divs a visitor is shown as clickable', () => {
+    const labels = findClickables(pageWith(DIALOG)).map((entry) => entry.label);
+
+    expect(labels).toEqual(expect.arrayContaining(['REMOVE', 'MOVE TO WISHLIST']));
+    expect(labels).not.toContain('Remove Item');
+  });
+
+  it('treats an overlay’s icon-only X as the thing that closes it, so it goes last', () => {
+    const found = findClickables(pageWith(DIALOG));
+
+    expect(found.filter((entry) => entry.dismisses === true).map((entry) => entry.selector)).toHaveLength(1);
+    expect(found.find((entry) => entry.label === 'REMOVE')?.dismisses).toBe(false);
+  });
+
+  it('lists a clickable card once, not once per child that inherits its cursor', () => {
+    const labels = findClickables(
+      pageWith('<style>.card,.card span{cursor:pointer}</style><div class="card"><span>Polo</span></div>'),
+    ).map((entry) => entry.label);
+
+    expect(labels).toEqual(['Polo']);
+  });
+
+  it('leaves a wrapper around a real control to the control', () => {
+    const found = findClickables(
+      pageWith('<style>.tile{cursor:pointer}</style><div class="tile"><button>Add</button></div>'),
+    );
+
+    expect(found.map((entry) => entry.label)).toEqual(['Add']);
+  });
+});
+
+describe('noticesIn', () => {
+  it('reads what a toast says, once, from the innermost element that says it', () => {
+    pageWith(
+      '<div class="Toastify__toast-container"><div class="Toastify__toast" role="alert">' +
+        'This item is   unavailable</div></div><div role="status">Added to bag</div>',
+    );
+
+    expect(noticesIn(document)).toEqual(['This item is unavailable', 'Added to bag']);
+  });
+
+  it('ignores hidden regions and anything too long to be a message', () => {
+    pageWith(
+      `<div role="alert" style="display:none">Hidden</div><div aria-live="polite">${'x'.repeat(200)}</div>`,
+    );
+
+    expect(noticesIn(document)).toEqual([]);
   });
 });
